@@ -126,10 +126,10 @@ opt$fcst_orgn      = c( "fo1","fo2","fo3","fo4" )
 opt$fcst_trgt      = list( beg = as.Date("2004-03-01"), end = as.Date("2017-12-01") )
 opt$sy             = "y";
 opt$created        = "2018-04-13"
-opt$fcst_eval_smpl = list( fullsample  = list( beg = c(2004,1), end = c(2017,4) ),
-                           pre_crisis  = list( beg = c(2004,1), end = c(2007,3) ),
-                           crisis      = list( beg = c(2007,4), end = c(2010,3) ),
-                           post_crisis = list( beg = c(2010,4), end = c(2017,4) ) )
+opt$fcst_eval_smpl = list( fullsample = list( beg = c(2004,1), end = c(2017,4) ),
+                           precrisis  = list( beg = c(2004,1), end = c(2007,3) ),
+                           crisis     = list( beg = c(2007,4), end = c(2010,3) ),
+                           postcrisis = list( beg = c(2010,4), end = c(2017,4) ) )
 opt$metric         = c( "rmsfe", "mlogs", "mcrps" )
 
 ### prepare PSQL: ncstlvpseudo
@@ -177,8 +177,8 @@ if( FALSE ){
 
 
 path = list()
-path$main_D = "D:\\LNB\\NCST-LV-PSEUDO\\"         # "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" # 
-path$main_K = "K:\\NotesLNB\\NCST-LV-PSEUDO\\"    # "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" #
+path$main_D = "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" # "D:\\LNB\\NCST-LV-PSEUDO\\"         # 
+path$main_K = "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" # "K:\\NotesLNB\\NCST-LV-PSEUDO\\"    # 
 
 path$data = paste0( path$main_D, "DATA\\")
 path$vntg = paste0( path$data  , "NCST-VNTG\\")
@@ -925,17 +925,44 @@ list_resu_alle = list.files( path$resu )
 
 ### insert into PSQL
 drv <- dbDriver("PostgreSQL")
-conn <- dbConnect(drv, dbname="sboriss", host="localhost", user="postgres", password="postgres", port="5432")
+conn <- dbConnect(drv, dbname="postgres", host="localhost", user="postgres", password="postgres", port="5432")
 
-dbGetQuery(conn, "SET search_path to sboriss")
-dbGetQuery(conn, "CREATE EXTENSION IF NOT EXISTS hstore;") 
+#dbGetQuery(conn, "SET search_path to sboriss")
+#dbGetQuery(conn, "CREATE EXTENSION IF NOT EXISTS hstore;") 
 
-dbGetQuery(conn, "DELETE FROM ncstlvpseudo.resu;") 
+if( FALSE ){ 
+  
+    # dbGetQuery(conn, "DELETE FROM ncstlvpseudo.resu;") 
+    
+    query_sql = "CREATE TABLE ncstlvpseudo.resu ( created date not null, model varchar(256) not null, fcstorig char(3) not null, stochvol varchar(6) not null, lambdaset char(7) not null, PRIMARY KEY(created, model, fcstorig, stochvol, lambdaset ) );"
+    dbGetQuery(conn, query_sql ) 
+    
+    colname2psql_hstore = c( colnames( tsdbx ) ); colname2psql_hstore
+    
+    for( i in seq_along(colname2psql_hstore) ){ # i = 1
+    
+      query_sql = sprintf( "ALTER TABLE ncstlvpseudo.resu ADD COLUMN %s hstore", colname2psql_hstore[ i ]);
+      dbGetQuery(conn, query_sql ) 
+    
+    }
+    
+    colname2psql_metric = paste( rep( opt$metric, each = 4), rep( names( opt$fcst_eval_smpl), 3) , sep="_" ); colname2psql_metric
+    
+    for( i in seq_along(colname2psql_metric) ){ # i = 1
+      
+      query_sql = sprintf( "ALTER TABLE ncstlvpseudo.resu ADD COLUMN %s double precision", colname2psql_metric[ i ]);
+      dbGetQuery(conn, query_sql ) 
+      
+    }
+    
+}
 
-sapply(list_resu_alle, function(file_name){ # file_name = list_resu_alle[151]; file_name
+### insert fcst summary of each model into PSQL
+if( FALSE ){ 
+  sapply(list_resu_alle, function(file_name){ # file_name = list_resu_alle[151]; file_name
   
   dbx = read.csv( paste0( path$resu, file_name ), stringsAsFactors = F ); head( dbx )
-  tsdbx = ts( dbx, start = c( dbx$year[1], dbx$period[1], frequency = 4 ) )[, -c(1,2)]
+  tsdbx = ts( dbx, start = c( dbx$year[1], dbx$period[1] ), frequency = 4 )[, -c(1,2)]
   
   file_name_aux = gsub( "as_in_CCM2015", "ccm2015", file_name     ); file_name_aux
   
@@ -972,10 +999,10 @@ sapply(list_resu_alle, function(file_name){ # file_name = list_resu_alle[151]; f
     
   })
   
-  ### summmarize fcst accuracy
+  ### summmarize fcst accuracy -> insert into PSQL
   sapply(opt$metric, function(i_metric){ # i_metric = opt$metric[1]; i_metric
     
-    pool_subsamples = lapply( opt$fcst_eval_smpl, function( smpl ){ #smpl = fcst_eval_smpl[[3]]
+    pool_subsamples = lapply( opt$fcst_eval_smpl, function( smpl ){ # smpl = opt$fcst_eval_smpl[[4]]; smpl
       
       if( i_metric == "rmsfe" ) ud = window( tsdbx[, "erro_q50pp"], start = smpl$beg, end = smpl$end )**2 %>% mean %>% sqrt
       if( i_metric == "mcrps" ) ud = window( tsdbx[, "crps"      ], start = smpl$beg, end = smpl$end )    %>% mean 
@@ -983,24 +1010,269 @@ sapply(list_resu_alle, function(file_name){ # file_name = list_resu_alle[151]; f
       ud
       
     })
-    pool_metric = do.call( "cbind.data.frame", pool_subsamples )
+    pool_metric = do.call( "cbind.data.frame", pool_subsamples ); pool_metric
     
     ### insert into PSQL
-    hstore2sql = paste( colnames( pool_metric ), pool_metric, sep="=>", collapse=",")
-    sql_query <- sprintf("UPDATE ncstlvpseudo.resu SET %s = '%s' WHERE created = '%s' AND model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s'", 
-                         i_metric, hstore2sql, opt$created, model_choice, fcst_orgn,SV_switch,lambdaset );sql_query
-    dbGetQuery(conn, sql_query)  
+    # hstore2sql = paste( colnames( pool_metric ), pool_metric, sep="=>", collapse=",")
+    # sql_query <- sprintf("UPDATE ncstlvpseudo.resu SET %s = '%s' WHERE created = '%s' AND model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s'", 
+    #                      i_metric, hstore2sql, opt$created, model_choice, fcst_orgn,SV_switch,lambdaset );sql_query
+    
+    ### insert into PSQL
+    sapply( names(pool_metric), function(sample){ # sample = names(pool_metric)[1]; sample
+      
+        metric_value = pool_metric[[ sample ]]; metric_value
+        
+        sql_query <- sprintf("UPDATE ncstlvpseudo.resu SET %s_%s = %s WHERE created = '%s' AND model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s'", 
+                             i_metric,sample, metric_value, opt$created, model_choice, fcst_orgn,SV_switch,lambdaset );sql_query
+        dbGetQuery(conn, sql_query) 
+        
+    })
     
   })
+
 })
+}
 
-sql_query = sprintf(  "SELECT model, fcstorig FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", "AR2+incpt", "SV-ON", "diffuse" ); sql_query
-dbGetQuery(conn, sql_query ) 
+#sql_query = sprintf(  "SELECT model, fcstorig FROM ncstlvpseudo.resu WHERE model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, fcstorig, stochvol, lambdaset ); sql_query
 
-model = "AR2+incpt+vacancy_yoy+omxr_qoq+survreta_lvl+retail_yoy+survind_lvl+survind_biud"
+getMetricFromPSQL = function( model, stochvol, lambdaset, metric, sample ){
+  
+  sql_query = sprintf(  "SELECT fcstorig, %s -> '%s' AS %s_%s FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", metric, sample, metric, sample, model, stochvol, lambdaset ); sql_query
+  dbGetQuery(conn, sql_query )  
 
-sql_query = sprintf(  "SELECT fcstorig, stochvol, lambdaset, public.skeys(rmsfe), public.svals(rmsfe), model  FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, "SV-ON", "diffuse" ); sql_query
-dbGetQuery(conn, sql_query ) 
+}
+getMetricFromPSQLbyFO = function( stochvol, lambdaset, fcstorig, metric_sample ){
+  
+  sql_query = sprintf(  "SELECT model, fcstorig, %s FROM ncstlvpseudo.resu WHERE stochvol = '%s' AND lambdaset = '%s' AND fcstorig = '%s';", 
+                        metric_sample, stochvol, lambdaset, fcstorig ); sql_query
+  dbGetQuery(conn, sql_query )  
+  
+}
+getMetricFromPSQLbyFOcond = function( stochvol, lambdaset, fcstorig, metric_sample, condition ){
+  
+  sql_query = sprintf(  "SELECT model, fcstorig, %s FROM ncstlvpseudo.resu WHERE stochvol = '%s' AND lambdaset = '%s' AND fcstorig = '%s' %s;", 
+                        metric_sample, stochvol, lambdaset, fcstorig, condition ); sql_query
+  dbGetQuery(conn, sql_query )  
+  
+}
+getMetricForSingleModelFromPSQLbyFO = function( model, stochvol, lambdaset, fcstorig, metric_sample ){
+  
+  sql_query = sprintf(  "SELECT model, fcstorig, %s FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' AND fcstorig = '%s';", 
+                        metric_sample, model, stochvol, lambdaset, fcstorig ); sql_query
+  dbGetQuery(conn, sql_query )  
+  
+}
+
+getMetricForSingleModelFromPSQL = function( model, stochvol, lambdaset, metric_sample ){
+  
+  sql_query = sprintf(  "SELECT model, fcstorig, %s FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s';", 
+                        metric_sample, model, stochvol, lambdaset ); sql_query
+  dbGetQuery(conn, sql_query )  
+  
+}
+
+model     = "AR0+incpt" #"AR2+incpt+vacancy_yoy+omxr_qoq+survreta_lvl+retail_yoy+survind_lvl+survind_biud" # ,"AR2+incpt+irate3m_qoq"	
+
+###############################
+### point forecasts ###########
+###############################
+
+#compare AR0 with AR2: rmsfe
+choice_metrix = paste( "rmsfe", names( opt$fcst_eval_smpl ), sep = "_" )
+pool_pair_metrix = lapply( choice_metrix, function( name2get ){ # name2get = choice_metrix[1]
+    
+    joint = list( lambdaset = "diffuse", stochvol  = "SV-OFF", name2get = name2get ) 
+    malte = list( model = "AR2+incpt")
+    mbcnh = list( model = "AR0+incpt" )
+    
+    malte_metrx = getMetricForSingleModelFromPSQL( malte$model, joint$stochvol, joint$lambdaset, joint$name2get )
+    mbnch_metrx = getMetricForSingleModelFromPSQL( mbcnh$model, joint$stochvol, joint$lambdaset, joint$name2get )
+    
+    metrix = rbind( name2get, round( mbnch_metrx[[ joint$name2get ]], digits = 3), 
+                              round( malte_metrx[[ joint$name2get ]], digits = 3)  )
+    rownames( metrix ) = c( "name2get", mbcnh$model, malte$model )
+    colnames( metrix ) = mbnch_metrx$fcstorig; metrix
+
+})
+names( pool_pair_metrix ) = choice_metrix; pool_pair_metrix
+do.call( "rbind", pool_pair_metrix )
+
+### select models that are more accurate than benchmark
+fcstorig      = "fo1"	
+stochvol      = "SV-OFF"	
+lambdaset     = "diffuse" # "ccm2015" # 
+metric_sample = "rmsfe_crisis"  #  "rmsfe_postcrisis"  # 
+
+bnch = getMetricForSingleModelFromPSQLbyFO( "AR2+incpt", "SV-OFF", "diffuse", fcstorig, metric_sample )
+bnch_condition = paste( "AND",names( bnch )[3],"<", bnch[[3]] ); 
+bnch; bnch_condition 
+
+accu_condition = getMetricFromPSQLbyFOcond( stochvol, lambdaset, fcstorig, metric_sample, bnch_condition )
+
+if( sum( dim( accu_condition ) ) > 0 ){ 
+
+  ratio2bnch = accu_condition[[ metric_sample ]] / bnch[[ metric_sample ]]
+  cbind( accu_condition, ratio2bnch, bnch[ , metric_sample]  )
+
+}else{
+  
+  cat( "NB! NO MODELS THAT BEAT THIS BENCHMARK CONDITION: ", bnch_condition)
+}
+###############################
+### density forecasts #########
+###############################
+
+fcstorig      = "fo1"	
+stochvol      = "SV-ON"	
+lambdaset     = "diffuse"
+metric_sample = "mcrps_postcrisis"
+
+bnch = getMetricForSingleModelFromPSQLbyFO( "AR2+incpt", "SV-ON", "diffuse", fcstorig, metric_sample )
+bnch_condition = paste( "AND",names( bnch )[3],"<", bnch[[3]] ); 
+bnch; bnch_condition 
+
+accu_condition = getMetricFromPSQLbyFOcond( stochvol, lambdaset, fcstorig, metric_sample, bnch_condition )
+
+ratio2bnch = accu_condition[[ metric_sample ]] / bnch[[ metric_sample ]]
+
+cbind( accu_condition, ratio2bnch, bnch[ , metric_sample]  )
+
+######################################################################################
+
+
+getTS2HSTORE = function( model, stochvol, lambdaset, fcstorig, name2get ){ 
+  
+  sql_query = sprintf(  "SELECT public.skeys( %s ), public.svals( %s ) FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' AND fcstorig = '%s';", name2get, name2get, model, stochvol, lambdaset, fcstorig ); sql_query
+  df = dbGetQuery(conn, sql_query ) 
+  dateBeg = as.Date( df$skeys[1] ); dateBeg
+  tsx = ts( as.numeric( df$svals ), start = c( year(dateBeg), quarter( dateBeg ) ), frequency = 4 )
+  #tfplot( tsx )
+  tsx
+}
+
+#############################################################
+### POINT FORECASTS #########################################
+#############################################################
+
+joint = list( fcstorig  = "fo4", lambdaset = "diffuse", stochvol  = "SV-ON", name2get = "erro_q50pp" ) 
+malte = list( model = "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy")
+mbcnh = list( model = "AR2+incpt" )
+             
+tsx       = getTS2HSTORE( malte$model, joint$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
+tsx_mbnch = getTS2HSTORE( mbcnh$model, joint$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
+
+tsx_fcst     = getTS2HSTORE( model, stochvol, lambdaset, fcstorig, "q50pp" )
+tsx_fcst_low = getTS2HSTORE( model, stochvol, lambdaset, fcstorig, "q16p5pp" )
+tsx_fcst_upp = getTS2HSTORE( model, stochvol, lambdaset, fcstorig, "q83p5pp" )
+tsx_otrn     = getTS2HSTORE( model, stochvol, lambdaset, fcstorig, "otrn" )
+
+tfplot( tsx_otrn ); 
+lines( tsx_fcst, col = "red");lines( tsx_fcst_low, col = "blue"); lines( tsx_fcst_upp, col = "blue")
+
+### effect of stochvol on point fcst accuracy
+
+joint = list( fcstorig  = "fo4", lambdaset = "diffuse", name2get = "erro_q50pp" ) 
+malte = list( model = "AR2+incpt", stochvol  = "SV-ON")
+mbcnh = list( model = "AR2+incpt", stochvol  = "SV-OFF" )
+
+tsx       = getTS2HSTORE( malte$model, malte$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
+tsx_mbnch = getTS2HSTORE( mbcnh$model, mbcnh$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
+
+
+cssfed = ts( cumsum( tsx_mbnch**2 - tsx**2 ), start = start( tsx_mbnch ), frequency = frequency( tsx_mbnch ) )
+
+tfplot( cssfed )
+
+tsx_otrn_malte = getTS2HSTORE( malte$model, malte$stochvol, joint$lambdaset, joint$fcstorig, "q50pp" )
+tsx_otrn_mbnch = getTS2HSTORE( mbcnh$model, mbcnh$stochvol, joint$lambdaset, joint$fcstorig, "q50pp" )
+
+tfplot( tsx_otrn_malte ); 
+lines( tsx_otrn_mbnch, col = "red")
+
+#############################################################
+### DENSITY FORECASTS #######################################
+#############################################################
+
+joint = list( fcstorig  = "fo4", lambdaset = "diffuse", name2get = "logs" ) 
+malte = list( model = "AR2+incpt+vacancy_yoy", stochvol  = "SV-ON")
+mbcnh = list( model = "AR2+incpt"            , stochvol  = "SV-OFF" )
+
+
+tsx       = getTS2HSTORE( malte$model, malte$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
+tsx_mbnch = getTS2HSTORE( mbcnh$model, malte$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
+
+cumsumdif = ts( cumsum( tsx_mbnch - tsx ), start = start( tsx_mbnch ), frequency = frequency( tsx_mbnch ) )
+
+tfplot( cumsumdif, ylab = paste( "cumsumdif", joint$name2get) )
+
+
+
+#########################################
+joint = list( fcstorig  = "fo4", lambdaset = "diffuse", name2get = "crps" ) 
+malte = list( model = "AR0+incpt", stochvol  = "SV-ON")
+mbcnh = list( model = "AR0+incpt", stochvol  = "SV-OFF" )
+
+
+tsx       = getTS2HSTORE( malte$model, malte$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
+tsx_mbnch = getTS2HSTORE( mbcnh$model, mbcnh$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
+
+cumsumdif = ts( cumsum( tsx_mbnch - tsx ), start = start( tsx_mbnch ), frequency = frequency( tsx_mbnch ) )
+
+tfplot( cumsumdif, ylab = paste( "cumsumdif", joint$name2get) )
+
+
+
+
+
+
+
+
+
+
+sample_list = c( "fullsample", "pre_crisis", "crisis", "post_crisis" )
+
+sql_query = sprintf( "SELECT DISTINCT model FROM ncstlvpseudo.resu;" ); sql_query
+model_list = dbGetQuery(conn, sql_query )
+model_list$model
+
+###loop over sample
+ud = lapply( sample_list, function( sample ) getMetricFromPSQL( model, stochvol, lambdaset, metric, sample ) ) 
+names( ud ) = sample_list
+ud
+
+### get those models that are better than benchmark for fo1 
+model_metric_fo1 = lapply( model_list$model, function( model ){ 
+  
+    ud = lapply( sample_list, function( sample ) getMetricFromPSQLbyFO( model, stochvol, lambdaset, metric, sample, "fo1" ) ) 
+    names( ud ) = sample_list
+    ud
+
+}); names( model_metric_fo1 ) = model_list$model
+model_metric_fo1
+
+
+
+# ### collect rmsfe in fullsample
+# sql_query = sprintf(  "SELECT fcstorig, rmsfe -> 'fullsample' AS rmsfe_fullsample FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, stochvol, lambdaset ); sql_query
+# dbGetQuery(conn, sql_query )
+# 
+# sql_query = sprintf(  "SELECT fcstorig, rmsfe -> 'pre_crisis' AS rmsfe_pre_crisis FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, stochvol, lambdaset ); sql_query
+# dbGetQuery(conn, sql_query )
+# 
+# sql_query = sprintf(  "SELECT fcstorig, rmsfe -> 'crisis' AS rmsfe_crisis FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, stochvol, lambdaset ); sql_query
+# dbGetQuery(conn, sql_query )
+# 
+# sql_query = sprintf(  "SELECT fcstorig, rmsfe -> 'post_crisis' AS rmsfe_post_crisis FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, stochvol, lambdaset ); sql_query
+# dbGetQuery(conn, sql_query )
+# 
+# 
+# sql_query = sprintf(  "SELECT model, fcstorig FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", "AR2+incpt", "SV-ON", "diffuse" ); sql_query
+# dbGetQuery(conn, sql_query ) 
+# 
+# model = "AR2+incpt+vacancy_yoy+omxr_qoq+survreta_lvl+retail_yoy+survind_lvl+survind_biud"
+# 
+# sql_query = sprintf(  "SELECT fcstorig, stochvol, lambdaset, public.skeys(rmsfe), public.svals(rmsfe), model  FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, "SV-ON", "diffuse" ); sql_query
+# dbGetQuery(conn, sql_query ) 
 
 
 
@@ -1168,10 +1440,10 @@ ts2hstore = function( x ){
   x_hstore
 }
 
-ts2hstore( tsy )
+ts2hstore( ts( rnorm(5), start = 1 ) )
 
 ### upload to SQL 
-sql_query <- sprintf("INSERT INTO public.books (title, attr) VALUES ('MY DATA','%s')", x_hstore ); sql_query
+sql_query <- sprintf("INSERT INTO public.books (title, attr) VALUES ('MY DATA','%s')", ts2hstore( ts( rnorm(5), start = 1 ) ) ); sql_query
 df = dbGetQuery(conn, sql_query)
 
 str( df )
@@ -1284,4 +1556,54 @@ ts_cscrps  = ts( mat_cscrps, start = start( mat_crps ), frequency = frequency( m
 tfplot( ts_cscrps, title = paste("CSCRPS: \n", title4plot ) )
 
 
+###################################################
+list_info_tsx
 
+SIM = sapply( list_info_tsx, "[[", 2 ); attributes( SIM ) = NULL; str( SIM )
+
+### drop 'incpt' from SIM
+SIM = SIM[ -which( SIM == "incpt" )]; SIM
+
+unique_x = unique( sapply( SIM, function(x) strsplit( x, "_" ) %>% unlist %>% `[[`(1) ) ); unique_x
+
+### create all combinations of two indicators
+DIM0 = combn(SIM, 2); length( DIM0 )
+
+### remove pairs with the same x
+sx = unique_x[1]; sx
+
+dim( DIM0 )
+
+### loop over sx
+indx_doubles = sapply( unique_x, function(sx){
+
+  which( apply( DIM0, 2, function( pair_sx ) all( grepl( sx, pair_sx ) ) ) )
+
+})
+
+DIM = DIM0[, -( indx_doubles %>% unlist )  ]; DIM[, 1]
+
+### create all combinations of three indicators
+TIM00 = combn(SIM, 3); length( TIM00 ); TIM00[,1]; TIM00[,9846]
+
+### remove triples with the same x
+
+### loop over sx
+indx_triples = sapply( unique_x, function(sx){
+  
+  which( apply( TIM00, 2, function( triple_sx ) all( grepl( sx, triple_sx ) ) ) )
+  
+})
+
+TIM0 = TIM00[, -( indx_triples %>% unlist )  ]; TIM0[, 1]
+
+### remove doubles with the same x
+
+### loop over sx
+indx_doubles_in_triples = sapply( unique_x, function(sx){
+  
+  which( apply( TIM0, 2, function( triple_sx ) sum( grepl( sx, triple_sx ) ) == 2 ) )
+  
+})
+
+TIM = TIM0[, -( indx_doubles_in_triples %>% unlist )  ]; TIM[, 1]; dim( TIM )
