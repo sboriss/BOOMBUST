@@ -1,0 +1,69 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.path = 'figures/', echo = FALSE, warning = FALSE, message = FALSE)
+
+options(allow_html_in_all_outputs=TRUE)
+
+cat("\014")  # clear console
+rm(list=ls(all=TRUE))
+
+library( tfplot   )
+library( readxl   )
+library( magrittr )
+
+```
+
+```{r functions}
+qoq     <- function( x ) ( ( x /stats::lag( x, k = -1 ) )^4 - 1 ) * 100
+```
+
+
+```{r test}
+path = list()
+path$main_D = "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" # "D:\\LNB\\NCST-LV-PSEUDO\\"         # 
+path$main_K = "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" # "K:\\NotesLNB\\NCST-LV-PSEUDO\\"    # 
+
+path$data = paste0( path$main_D, "DATA\\")
+path$vntg = paste0( path$data  , "NCST-VNTG\\")
+path$code = paste0( path$main_K, "CODE\\")
+path$plot = paste0( path$main_D, "PLOT\\")
+path$resu = paste0( path$main_D, "RESU\\")
+path$summ = paste0( path$main_D, "RESU_SUMM\\")
+
+do_vint <- list()
+do_vint$GDP = FALSE # TRUE # 
+do_vint$TSX = FALSE # TRUE
+
+### outturns to compute forecast accuracy
+# taken from Q:\CSP_MPP_DATI\IKP\IKP_IZL\2018\IEN_3
+gdp_lv = paste0( path$data, "IKP_IZL_201710_201712.xlsx" )
+gdp_ch = paste0( path$data, "qna_e_csa_seco_2018-03-01.xlsx" )
+
+db_lv = read_excel( gdp_lv, sheet = "0102Q_chain_season.adj." ); head( db_lv )
+db_ch = read_excel( gdp_ch, sheet = "real_q" ); head( db_ch ) 
+
+### determine rows with dates in the first column-Q
+date_indx_lv = grep( "^[0-9]{4}-Q[1-4]{1}$", db_lv[[1]] )
+date_beg_lv  = strsplit( db_lv[[1]][ date_indx_lv[1] ], "-Q", fixed = T ) %>% unlist %>% as.numeric; date_beg_lv
+tsy_lvl_lv = ts( db_lv[["X__1"]][ date_indx_lv ] %>% as.numeric, start = date_beg_lv, frequency = 4 )
+
+### determine rows with dates in the first column-Q
+date_indx_ch = grep( "^[0-9]{4}$", db_ch[[1]] )
+date_beg_ch  = c( db_ch[[1]][ date_indx_ch[1] %>% as.numeric ],db_ch[[2]][ date_indx_ch[1] %>% as.numeric ] ); date_beg_ch
+tsy_lvl_ch = ts( db_ch[["X__3"]][ date_indx_ch ] %>% as.numeric, start = date_beg_ch, frequency = 4 )
+
+
+tsy_lv = qoq( tsy_lvl_lv ); tsy_lv
+tsy_ch = qoq( tsy_lvl_ch ); tsy_ch
+
+tfplot( tsy_lv, lwd = 2 ); abline( h = 0 )
+lines( tsy_ch, lwd = 2, col = 2 )
+
+```
