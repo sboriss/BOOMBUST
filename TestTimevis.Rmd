@@ -1,0 +1,258 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+
+```{r setup, include=FALSE}
+
+#Sys.setlocale("LC_TIME", "C");
+#sessionInfo()
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.path = 'figures/', echo = FALSE, warning = FALSE, message = FALSE)
+
+cat("\014")  # clear console
+rm(list=ls(all=TRUE))
+
+library(timevis)
+library( timelineS )
+library( timeDate )
+
+```
+28.02.2018 GDP has grown by 4.5 % in 2017 and by 4.2 % in the 4th quarter
+28.02.2018 In January, retail trade turnover grew by 7.1 %
+06.03.2018 In January, industrial output grew by 4.2 %
+12.03.2018 Janvari precu arejas tirdzniecibas apgrozijums par 12,4 % lielaks neka pern
+           In January foreign trade turnover in goods was 12.4 % larger than last year
+21.03.2018 Razotaju cenu limenis rupnieciba februari palielinajas par 0,5 %
+           In February level of producer prices in industry increased by 0.5 %
+29.03.2018 Februari mazumtirdzniecibas apgrozijums pieauga par 3,7 %
+           In February, retail trade turnover grew by 3.7 %
+03.04.2018 Februari rupniecibas produkcijas apjoms pieauga par 8,7 %
+           In February, industrial output grew by 8.7 %
+09.04.2018 Februari precu arejas tirdzniecibas apgrozijums par 9,9 % lielaks neka pern
+           In February foreign trade turnover in goods was 9.9 % larger than last year
+10.04.2018 Videjais paterina cenu limenis gada laika palielinajas par 2,2 %
+           During the year, the average level of consumer prices increased by 2.2 %
+
+
+
+
+
+```{r}
+gdp_4     = c( name = "GDP"     , period = "Q1" , date = "2018-02-28" )
+retail_1  = c( name = "RETAIL"  , period = "I"  , date = "2018-02-28" )
+surv_2    = c( name = "SURVINDU", period = "Q1" , date = "2018-02-28" )
+iip_1     = c( name = "IIP"     , period = "I"  , date = "2018-03-06" )
+upers_2   = c( name = "UPERS"   , period = "II" , date = "2018-03-09" )
+vacancy_2 = c( name = "VACANCY" , period = "II" , date = "2018-03-09" )
+exptot_1  = c( name = "EXPTOT"  , period = "I"  , date = "2018-03-12" )
+ppi_2     = c( name = "PPI"     , period = "II" , date = "2018-03-21" )
+retail_2  = c( name = "RETAIL"  , period = "II" , date = "2018-03-29" )
+iip_2     = c( name = "IIP"     , period = "II" , date = "2018-04-03" )
+exptot_2  = c( name = "EXPTOT"  , period = "II" , date = "2018-04-09" )
+cpi_2     = c( name = "CPI"     , period = "III", date = "2018-04-10" )
+upers_3   = c( name = "UPERS"   , period = "III", date = "2018-04-20" )
+vacancy_3 = c( name = "VACANCY" , period = "III", date = "2018-04-20" )
+
+data = list( gdp_4, retail_1, iip_1, upers_2,vacancy_2,exptot_1, ppi_2, retail_2, iip_2, exptot_2, cpi_2,upers_3,vacancy_3 )
+
+dfdata <- data.frame(
+  id      = seq(1, length(data) ),
+  content = paste( sapply(data, "[", "name" ), sapply(data, "[", "period" ), sep = ":" ) ,
+  start   = sapply(data, "[", "date" ),
+  end     = rep(NA, length(data) )
+)
+dfdata
+timevis(dfdata) 
+```
+
+### adopt a timelineS command to my wishes
+```{r}
+
+r1 = as.Date( "2017-12-31" )
+r2 = as.Date( "2018-04-30" )
+
+main = "Release timing"
+xlab = NA
+scale.above = T
+scale.small = "5 days"
+scale.format = "%b %d"
+scale.font   = 1
+scale.cex    = 0.75
+scale.orient = 1
+line.color = "gray44"
+line.width = 1
+scale.tickwidth = 1
+label.color = "gray44"
+h = 0
+
+range.events = c( r1, r2 )
+
+plot(NA, ylim = c(0, 1), xlim = range.events, ann = FALSE, axes = FALSE)
+title(main = main, xlab = xlab)
+ticks_small = seq( r1, r2, by = scale.small)
+ticks_eom   = unique( as.Date( timeLastDayInMonth( xaxis_daily ) ) )
+
+axis.Date(ifelse(scale.above == TRUE, 3, 1), at = ticks_small,
+        format = scale.format, cex.axis = scale.cex, pos = h,
+        lwd.tick = scale.tickwidth, col = line.color, font = scale.font,
+        las = scale.orient, labels = FALSE, tck= 0.02 )
+axis.Date(ifelse(scale.above == TRUE, 3, 1), at = ticks_eom,
+        format = scale.format, cex.axis = scale.cex, pos = h,
+        lwd.tick = scale.tickwidth, col = line.color, font = scale.font,
+        las = scale.orient, labels = FALSE, tck= -0.05 )
+text(x = ticks_small-2, par("usr")[3]*.9, labels = paste(format( ticks_small, scale.format ),' '), srt = 45, pos = 1, xpd = TRUE,cex=.7)
+
+segments(as.Date("2018-02-28"), 0, as.Date("2018-02-28"), 0.8, col = label.color)
+color <- shadepalette(grey(0.8), "blue", n = 50)
+filledrectangle(wx = 12, wy = 0.1, col = color,mid = c( as.Date("2018-02-28"), 0.8), angle = 0)
+text( as.Date("2018-02-28"), 0.8, "GDP:Q1", cex=0.75)
+
+
+### check this: https://stackoverflow.com/questions/41967849/how-do-i-shift-axis-labels-to-the-left-so-that-they-are-aligned-with-tick-marks?rq=1
+
+
+```
+
+
+```{r}
+mj_life
+timelineS(mj_life, main = "Life of Michael Jackson", 
+label.direction = "up", label.length = c(0.2,0.8,0.4,1.2), label.position = 3, 
+line.color = "blue", label.color = "blue", point.color = "blue", pch = "-")
+
+timelineB = function (df, main = NA, xlab = NA, buffer.days = 600, line.width = 5, 
+    line.color = "gray44", scale = "year", scale.format = "%Y", 
+    scale.font = 2, scale.orient = 1, scale.above = FALSE, scale.cex = 1, 
+    scale.tickwidth = 2, labels = paste(df[[1]], df[[2]]), label.direction = "downup", 
+    label.length = c(0.5, 0.5, 0.8, 0.8), label.position = c(1, 
+        3), label.color = "gray44", label.cex = 0.8, label.font = 1, 
+    label.angle = 0, pch = 20, point.cex = 1, point.color = "gray44") 
+{
+    if (!is.data.frame(df)) {
+        stop("'df' must be a data frame")
+    }
+    df <- df[rowSums(is.na(df)) == 0, ]
+    event.names <- df[[1]]
+    event.dates <- df[[2]]
+    if (label.direction == "downup") {
+        d = c(-1, 1)
+        h = 0
+    }
+    else if (label.direction == "updown") {
+        d = c(1, -1)
+        h = 0
+    }
+    else if (label.direction == "up") {
+        d = 1
+        h = -0.7
+    }
+    else if (label.direction == "down") {
+        d = -1
+        h = 0.7
+    }
+    else {
+        d = c(-1, 1)
+        h = 0
+        print("incorrect label.direction, plot used default")
+    }
+    range.events <- range(min(event.dates) - buffer.days, max(event.dates) + 
+        buffer.days)
+    r1 <- range.events[1]
+    r2 <- range.events[2]
+    plot(NA, ylim = c(-1, 1), xlim = range.events, ann = FALSE, 
+        axes = FALSE)
+    title(main = main, xlab = xlab)
+    points <- rep_len(d * label.length, length.out = nrow(df))
+    events <- rep_len(label.position, length.out = nrow(df))
+    segments(event.dates, h, event.dates, points + h, col = label.color)
+    
+    xaxis_at = seq(as.Date(paste0(lubridate::year(r1), 
+        "-", lubridate::month(r1), "-", 1)), as.Date(paste0(lubridate::year(r2), 
+        "-", lubridate::month(r2) + 1, "-", 1)), by = scale)
+    
+    axis.Date(ifelse(scale.above == TRUE, 3, 1), at = xaxis_at, 
+        format = scale.format, cex.axis = scale.cex, pos = h, 
+        lwd.tick = scale.tickwidth, col = line.color, font = scale.font, 
+        las = scale.orient, labels = FALSE )
+    text(x = xaxis_at, par("usr")[3]*.99, labels = paste(xaxis_at,' '), srt = 45, pos = 1, xpd = TRUE,cex=.7)
+    abline(h = h, lwd = line.width, col = line.color)
+    points(x = event.dates, y = points + h, pch = pch, cex = point.cex, 
+        col = point.color)
+    text(x = event.dates, y = points + h, labels = labels, cex = label.cex, 
+        pos = events, font = label.font, srt = label.angle)
+}
+
+
+data_timeline <- data.frame(
+  Events      = paste( sapply(data, "[", "name" ), sapply(data, "[", "period" ), sep = ":" ) ,
+  Event_Dates = as.Date( sapply(data, "[", "date" ) )
+)
+timelineS(data_timeline, main = "Release schedule", 
+label.direction = "up", label.length = c(0.2,0.8,0.4,1.2), label.position = 3, 
+line.color = "blue", label.color = "blue", point.color = "blue", pch = "-")
+
+timelineS(data_timeline[ 1:9, ],label.direction = "up", buffer.days = 10, scale = "week", scale.format = "%b %d", main = "Release timing",scale.font = 1,scale.cex = 0.75,scale.orient = 1)
+
+```
+
+```{r}
+data <- data.frame(
+  id      = 1:4,
+  content = c("Item one"  , "Item two"  ,"Ranged item", "Item four"),
+  start   = c("2016-01-10", "2016-01-11", "2016-01-20", "2016-02-14 15:00:00"),
+  end     = c(NA          ,           NA, "2016-02-04", NA)
+)
+```
+
+
+
+```{r}
+myTimeline<-timevis(
+         data.frame(id = 1:2,
+                    content = c("one", "two"),
+                    start = c("2016-01-10", "2016-01-12"))
+     )
+htmlwidgets::saveWidget(myTimeline, "myTimeLine.png", selfcontained = T)
+```
+
+```{r}
+library( shape )
+color <- shadepalette(grey(0.8), "blue", n = 50)
+plot(NA, main = "filledrectangle", ylim = c(-1,1), xlim= c(-1,1)) #empty
+filledrectangle(wx = 0.3, wy = 0.3, col = color,mid = c(0, 0), angle = 0)
+text( 0, 0, "GDP:Q1", cex=0.75)
+#textflag(mid = c(0.5, 0.5), radx = 0.2, rady = 0.2, lcol = "white", lab = "hello", cex = 1, font = 1)
+#mtext( c(0,0))
+
+library(grid)
+plot(NA, main = "filledrectangle", ylim = c(-1,1), xlim= c(-1,1)) #empty
+grid.roundrect(width=.1, height=.1, x = 0.5, y = 0.5)
+grid.text("GDP:Q1")
+
+box1 <- boxGrob(c("ISBN", "title", "pub"), x=0.3)
+box2 <- boxGrob(c("ID", "name", "country"), x=0.7)
+grid.draw(box1)
+grid.draw(box2)
+
+
+
+plot(NA, main = "filledrectangle", ylim = c(-1,1), xlim= c(-1,1)) #empty
+grid.roundrect(width=.5, height=.5, name="rr")
+
+theta <- seq(0, 360, length=50)
+for (i in 1:50)
+    grid.circle(x=grobX("rr", theta[i]),
+                y=grobY("rr", theta[i]),
+                r=unit(1, "mm"),
+                gp=gpar(fill="black"))
+```
+
+
