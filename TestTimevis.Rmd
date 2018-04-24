@@ -11,7 +11,7 @@ output:
 
 ```{r setup, include=FALSE}
 
-#Sys.setlocale("LC_TIME", "C");
+Sys.setlocale("LC_TIME", "C");
 #sessionInfo()
 
 knitr::opts_chunk$set(echo = TRUE)
@@ -20,9 +20,10 @@ knitr::opts_chunk$set(fig.path = 'figures/', echo = FALSE, warning = FALSE, mess
 cat("\014")  # clear console
 rm(list=ls(all=TRUE))
 
-library(timevis)
+library( timevis   )
 library( timelineS )
-library( timeDate )
+library( timeDate  )
+library( shape     )
 
 ```
 28.02.2018 GDP has grown by 4.5 % in 2017 and by 4.2 % in the 4th quarter
@@ -46,31 +47,32 @@ library( timeDate )
 
 
 ```{r}
-gdp_4     = c( name = "GDP"     , period = "Q1" , date = "2018-02-28" )
-retail_1  = c( name = "RETAIL"  , period = "I"  , date = "2018-02-28" )
-surv_2    = c( name = "SURVINDU", period = "Q1" , date = "2018-02-28" )
-iip_1     = c( name = "IIP"     , period = "I"  , date = "2018-03-06" )
-upers_2   = c( name = "UPERS"   , period = "II" , date = "2018-03-09" )
-vacancy_2 = c( name = "VACANCY" , period = "II" , date = "2018-03-09" )
-exptot_1  = c( name = "EXPTOT"  , period = "I"  , date = "2018-03-12" )
-ppi_2     = c( name = "PPI"     , period = "II" , date = "2018-03-21" )
-retail_2  = c( name = "RETAIL"  , period = "II" , date = "2018-03-29" )
-iip_2     = c( name = "IIP"     , period = "II" , date = "2018-04-03" )
-exptot_2  = c( name = "EXPTOT"  , period = "II" , date = "2018-04-09" )
-cpi_2     = c( name = "CPI"     , period = "III", date = "2018-04-10" )
-upers_3   = c( name = "UPERS"   , period = "III", date = "2018-04-20" )
-vacancy_3 = c( name = "VACANCY" , period = "III", date = "2018-04-20" )
+gdp_4     = c( name = "GDP"     , period = "Q1" , date = "2018-02-28", height = "0.8" )
+retail_1  = c( name = "RETAIL"  , period = "I"  , date = "2018-02-28", height = "0.6" )
+surv_2    = c( name = "SURVINDU", period = "II" , date = "2018-02-28", height = "0.5"  )
+iip_1     = c( name = "IIP"     , period = "I"  , date = "2018-03-06", height = "0.8"  )
+upers_2   = c( name = "UPERS"   , period = "II" , date = "2018-03-09", height = "0.8"  )
+vacancy_2 = c( name = "VACANCY" , period = "II" , date = "2018-03-09", height = "0.4"  )
+exptot_1  = c( name = "EXPTOT"  , period = "I"  , date = "2018-03-12", height = "0.8"  )
+ppi_2     = c( name = "PPI"     , period = "II" , date = "2018-03-21", height = "0.8"  )
+retail_2  = c( name = "RETAIL"  , period = "II" , date = "2018-03-29", height = "0.8"  )
+iip_2     = c( name = "IIP"     , period = "II" , date = "2018-04-03", height = "0.8"  )
+exptot_2  = c( name = "EXPTOT"  , period = "II" , date = "2018-04-09", height = "0.8"  )
+cpi_2     = c( name = "CPI"     , period = "III", date = "2018-04-10", height = "0.8"  )
+upers_3   = c( name = "UPERS"   , period = "III", date = "2018-04-20", height = "0.8"  )
+vacancy_3 = c( name = "VACANCY" , period = "III", date = "2018-04-20", height = "0.4"  )
 
-data = list( gdp_4, retail_1, iip_1, upers_2,vacancy_2,exptot_1, ppi_2, retail_2, iip_2, exptot_2, cpi_2,upers_3,vacancy_3 )
+data = list( gdp_4, retail_1,surv_2, iip_1, upers_2,vacancy_2,exptot_1, ppi_2, retail_2, iip_2, exptot_2, cpi_2,upers_3,vacancy_3 )
 
 dfdata <- data.frame(
   id      = seq(1, length(data) ),
   content = paste( sapply(data, "[", "name" ), sapply(data, "[", "period" ), sep = ":" ) ,
   start   = sapply(data, "[", "date" ),
-  end     = rep(NA, length(data) )
+  end     = rep(NA, length(data) ),
+  height  = sapply(data, "[", "height" )
 )
 dfdata
-timevis(dfdata) 
+#timevis(dfdata) 
 ```
 
 ### adopt a timelineS command to my wishes
@@ -98,7 +100,7 @@ range.events = c( r1, r2 )
 plot(NA, ylim = c(0, 1), xlim = range.events, ann = FALSE, axes = FALSE)
 title(main = main, xlab = xlab)
 ticks_small = seq( r1, r2, by = scale.small)
-ticks_eom   = unique( as.Date( timeLastDayInMonth( xaxis_daily ) ) )
+ticks_eom   = unique( as.Date( timeLastDayInMonth( ticks_small ) ) )
 
 axis.Date(ifelse(scale.above == TRUE, 3, 1), at = ticks_small,
         format = scale.format, cex.axis = scale.cex, pos = h,
@@ -110,10 +112,19 @@ axis.Date(ifelse(scale.above == TRUE, 3, 1), at = ticks_eom,
         las = scale.orient, labels = FALSE, tck= -0.05 )
 text(x = ticks_small-2, par("usr")[3]*.9, labels = paste(format( ticks_small, scale.format ),' '), srt = 45, pos = 1, xpd = TRUE,cex=.7)
 
-segments(as.Date("2018-02-28"), 0, as.Date("2018-02-28"), 0.8, col = label.color)
-color <- shadepalette(grey(0.8), "blue", n = 50)
-filledrectangle(wx = 12, wy = 0.1, col = color,mid = c( as.Date("2018-02-28"), 0.8), angle = 0)
-text( as.Date("2018-02-28"), 0.8, "GDP:Q1", cex=0.75)
+
+apply( dfdata, 1, function(entry){
+  
+    entry =  as.list( entry )
+    #entry = dfdata[1,]
+    height = as.numeric( as.character( entry$height ) )
+    segments(as.Date( entry$start ), 0, as.Date( entry$start ), height, col = label.color)
+    color <- shadepalette(grey(0.8), "white", n = 50)
+    filledrectangle(wx = 10, wy = 0.1, col = color, mid = c( as.Date( entry$start ), height), angle = 0)
+    text( as.Date( entry$start ), height, entry$content, cex=0.5)  
+
+})
+
 
 
 ### check this: https://stackoverflow.com/questions/41967849/how-do-i-shift-axis-labels-to-the-left-so-that-they-are-aligned-with-tick-marks?rq=1
