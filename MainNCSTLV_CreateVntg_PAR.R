@@ -3,6 +3,7 @@
 ### parallel computation over fcst target 
 ### add vintages for indicators with lagged variables
 ### store forecasting results in PSQL
+### run all 3888 models
 
 library( zoo        )
 library( lubridate  ) 
@@ -33,8 +34,8 @@ detach("package:dplyr", unload=TRUE)
 cat("\014")  # clear console
 rm(list=ls(all=TRUE))
 
-diq     <- function( x ) diff( x, k = 1 )
-diy     <- function( x ) diff( x, k = 4 )
+diq     <- function( x ) diff( x, lag = 1 )
+diy     <- function( x ) diff( x, lag = 4 )
 qoq     <- function( x ) ( ( x /stats::lag( x, k = -1 ) )^4 - 1 ) * 100
 yoy     <- function( x ) ( ( x /stats::lag( x, k = -4 ) )   - 1 ) * 100
 doArima <- function( tsy, p ) {
@@ -63,15 +64,16 @@ doArima <- function( tsy, p ) {
           armod$sigma2          
         },
         error=function(cond) {
-          
-          # armod    <- arima(tsy, order=c( p - 2, 2, 0 ) ); armod
-          # armod$sigma2    
-          
-          return( var( tsy ) )
+          tsy_L1 = lag( tsy, k = -1 )
+          data = na.omit( cbind( tsy, tsy_L1 ) )
+          ols = lm( tsy ~ tsy_L1, data = data )
+          return( summary(ols)$sigma**2 )
         },
         warning=function(cond) {
           # Choose a return value in case of warning
-          return(NULL)
+          armod    <- arima(tsy, order=c( p - 1, 1, 0 ) ); armod
+          armod$sigma2          
+          return(  armod$sigma2 )
         },
         finally={
           
@@ -82,7 +84,10 @@ doArima <- function( tsy, p ) {
     },
     warning=function(cond) {
       # Choose a return value in case of warning
-      return(NULL)
+      tsy_L1 = lag( tsy, k = -1 )
+      data = na.omit( cbind( tsy, tsy_L1 ) )
+      ols = lm( tsy ~ tsy_L1, data = data ); 
+      return( summary(ols)$sigma**2 )
     },
     finally={
       # NOTE:
@@ -120,23 +125,25 @@ ts2hstore    <- function( x ){
   x_hstore
 }
 
-
 opt <- list()
 opt$fcst_orgn      = c( "fo1","fo2","fo3","fo4" )
 opt$fcst_trgt      = list( beg = as.Date("2004-03-01"), end = as.Date("2017-12-01") )
 opt$sy             = "y";
-opt$created        = "2018-04-13"
+opt$created        = "2018-04-15"
 opt$fcst_eval_smpl = list( fullsample = list( beg = c(2004,1), end = c(2017,4) ),
                            precrisis  = list( beg = c(2004,1), end = c(2007,3) ),
                            crisis     = list( beg = c(2007,4), end = c(2010,3) ),
                            postcrisis = list( beg = c(2010,4), end = c(2017,4) ) )
 opt$metric         = c( "rmsfe", "mlogs", "mcrps" )
+opt$preddraws_quantile = c(0.005, 0.025, 0.05, 0.165, 0.25, 0.333, 0.50, 0.666, 0.75, 0.835, 0.95, 0.975, 0.9995 )
+opt$preddraws_quantile_name = paste0( "q", gsub( "\\.","p", as.character( opt$preddraws_quantile )  ) )
+opt$hstore2psql             = c( "otrn", "mean", "median", "erro_median", "logs", "crps" )
 
 ### prepare PSQL: ncstlvpseudo
 if( FALSE ){
   
   ### name of the table to store forecasting results:
-  psql_table2store_fcst = "ncstlvpseudo.resu"
+  psql_table2store_fcst = "ncstlvpseudo.resu3888"
   
   split_txt = strsplit( psql_table2store_fcst, ".", fixed = T) %>% unlist; split_txt
   dbExistsTable = dbGetQuery(conn, sprintf("SELECT EXISTS ( SELECT 1 FROM pg_tables WHERE schemaname = '%s' AND tablename = '%s' );", split_txt[1],  split_txt[2]) )
@@ -145,7 +152,7 @@ if( FALSE ){
   if( !dbExistsTable ){
     
     sql_query = paste0( "CREATE TABLE ", psql_table2store_fcst,
-                        "( created date not null, model varchar(256) not null, fcstorig varchar(3) not null, stochvol varchar(6) not null, lambdaset varchar(7) not null, 
+                        "( created date not null, xim char(3) not null, model varchar(256) not null, fcstorig varchar(3) not null, stochvol varchar(6) not null, lambdaset varchar(7) not null, 
                         otrn     hstore not null,
                         mean     hstore not null,
                         erro_q50 hstore not null,
@@ -177,8 +184,8 @@ if( FALSE ){
 
 
 path = list()
-path$main_D = "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" # "D:\\LNB\\NCST-LV-PSEUDO\\"         # 
-path$main_K = "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" # "K:\\NotesLNB\\NCST-LV-PSEUDO\\"    # 
+path$main_D = "D:\\LNB\\NCST-LV-PSEUDO\\"         # "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" # 
+path$main_K = "K:\\NotesLNB\\NCST-LV-PSEUDO\\"    # "c:\\Users\\BBB\\ARBEIT\\NCST-LV-PSEUDO\\" # 
 
 path$data = paste0( path$main_D, "DATA\\")
 path$vntg = paste0( path$data  , "NCST-VNTG\\")
@@ -190,6 +197,47 @@ path$summ = paste0( path$main_D, "RESU_SUMM\\")
 do_vint <- list()
 do_vint$GDP = FALSE # TRUE # 
 do_vint$TSX = FALSE # TRUE
+
+### open PSQL connection
+### insert into PSQL
+drv  <- dbDriver("PostgreSQL")
+conn <- dbConnect(drv, dbname="postgres", host="localhost", user="postgres", password="postgres", port="5432")
+
+#dbGetQuery(conn, "SET search_path to sboriss")
+#dbGetQuery(conn, "CREATE EXTENSION IF NOT EXISTS hstore;") 
+
+### set up PSQL
+if( FALSE ){ 
+  
+  # dbGetQuery(conn, "DELETE FROM ncstlvpseudo.resu;") 
+  # dbGetQuery(conn, "DELETE FROM ncstlvpseudo.resu WHERE xim = 'DIM';") 
+  # dbGetQuery(conn, "DELETE FROM ncstlvpseudo.resu WHERE xim = 'MIM';") 
+  # Delete all films but musicals: DELETE FROM films WHERE kind <> 'Musical';
+  
+  
+  query_sql = "CREATE TABLE ncstlvpseudo.resu3888 ( created date not null, xim char(3) not null, model varchar(256) not null, fcstorig char(3) not null, stochvol varchar(6) not null, lambdaset char(7) not null, PRIMARY KEY(created, model, fcstorig, stochvol, lambdaset ) );"
+  dbGetQuery(conn, query_sql ) 
+  
+  hstore2psql = c( opt$hstore2psql, opt$preddraws_quantile_name ); hstore2psql
+  
+  for( i in seq_along(hstore2psql) ){ # i = 1
+    
+    query_sql = sprintf( "ALTER TABLE ncstlvpseudo.resu ADD COLUMN %s hstore", hstore2psql[ i ]);
+    dbGetQuery(conn, query_sql ) 
+    
+  }
+  
+  colname2psql_metric = paste( rep( opt$metric, each = 4), rep( names( opt$fcst_eval_smpl), 3) , sep="_" ); colname2psql_metric
+  
+  for( i in seq_along(colname2psql_metric) ){ # i = 1
+    
+    query_sql = sprintf( "ALTER TABLE ncstlvpseudo.resu ADD COLUMN %s double precision", colname2psql_metric[ i ]);
+    dbGetQuery(conn, query_sql ) 
+    
+  }
+  
+}
+
 
 ### outturns to compute forecast accuracy
 # taken from Q:\CSP_MPP_DATI\IKP\IKP_IZL\2018\IEN_3
@@ -310,9 +358,8 @@ if( do_vint$GDP ){
   
 }
 
-### create vintages of indicators:
-if( do_vint$TSX){ 
-  
+### list_info_tsx
+if( TRUE ){
   info_survindu_lvl  = c( sx = "INDU.LV.TOT.COF.BS.M", sxs = "survindu_lvl", publag = "1", transf = "m2q_lvl" )
   info_survindu_diq  = c( sx = "INDU.LV.TOT.COF.BS.M", sxs = "survindu_diq", publag = "1", transf = "m2q_diq" )
   info_survindu_diy  = c( sx = "INDU.LV.TOT.COF.BS.M", sxs = "survindu_diy", publag = "1", transf = "m2q_diy" )
@@ -350,8 +397,8 @@ if( do_vint$TSX){
   # info_cit_qoq      = c( sx = "LV_BUDGET.CIT_SA"      , sxs = "cit_qoq"     , publag = "1", transf = "m2q_qoq" )
   # info_cit_yoy      = c( sx = "LV_BUDGET.CIT"         , sxs = "cit_yoy"     , publag = "1", transf = "m2q_yoy" )
   info_irate3m_lvl      = c( sx = "EURIBOR3MD_"       , sxs = "irate3m_lvl" , publag = "1", transf = "m2q_lvl" )
-  info_irate3m_qoq      = c( sx = "EURIBOR3MD_"       , sxs = "irate3m_qoq" , publag = "1", transf = "m2q_diq" )
-  info_irate3m_yoy      = c( sx = "EURIBOR3MD_"       , sxs = "irate3m_yoy" , publag = "1", transf = "m2q_diy" )
+  info_irate3m_qoq      = c( sx = "EURIBOR3MD_"       , sxs = "irate3m_diq" , publag = "1", transf = "m2q_diq" )
+  info_irate3m_yoy      = c( sx = "EURIBOR3MD_"       , sxs = "irate3m_diy" , publag = "1", transf = "m2q_diy" )
   info_loan2nfc_qoq      = c( sx = "LV_LOAN_NFC"      , sxs = "loan2nfc_qoq", publag = "1", transf = "m2q_qoq" )
   info_loan2nfc_yoy      = c( sx = "LV_LOAN_NFC"      , sxs = "loan2nfc_yoy", publag = "1", transf = "m2q_yoy" )
   info_loan2hh_qoq      = c( sx = "LV_LOAN_HH"        ,sxs = "loan2hh_qoq"  , publag = "1", transf = "m2q_qoq" )
@@ -401,10 +448,12 @@ if( do_vint$TSX){
     loan2nfc_yoy  = info_loan2nfc_yoy,
     loan2hh_qoq   = info_loan2hh_qoq,
     loan2hh_yoy   = info_loan2hh_yoy)
+}  
   
-  
-  
-  lapply( list_info_tsx, function(info_tsx){ # info_tsx = list_info_tsx[[10]]; info_tsx
+### create vintages of indicators:
+if( do_vint$TSX){ 
+
+  lapply( list_info_tsx, function(info_tsx){ # info_tsx = list_info_tsx[[2]]; info_tsx
     
     sx     = info_tsx[ "sx"     ] #"INDU.LV.TOT.COF.BS.M"
     publag = info_tsx[ "publag" ] # at the fcst origin
@@ -463,6 +512,7 @@ if( do_vint$TSX){
         mtsx_vntg = cbind( diy( tsx_lvl_vntg_m1), diy( tsx_lvl_vntg_m2 ), diy( tsx_lvl_vntg_m3 ) )
         colnames( mtsx_vntg ) = paste0( info_tsx[ "sxs" ], "_m", seq(1,3),"_diy" )              
         
+        cbind( diq( tsx_lvl_vntg_m1), diy( tsx_lvl_vntg_m1) )
       }
       if( transf == "m2q_yoy" ){
         
@@ -497,42 +547,109 @@ if( do_vint$TSX){
   
 }
 
-### do forecasts
-if( FALSE ){  
+### do forecasts and insert into PSQL
+if( TRUE ){ }  
   
   list_name_x = sapply( list_info_tsx, "[[", 2 );  attributes( list_name_x ) = NULL
-  list_model_choice_tmp = c( "AR0+incpt", "AR2+incpt", paste( "AR2+incpt", list_name_x, sep = "+") )
-  list_model_choice     = list_model_choice_tmp[ -which( list_model_choice_tmp == "AR2+incpt+incpt" ) ]
+  list_name_x = list_name_x[ -which( list_name_x == "incpt" )]; list_name_x
   
-  list_model_choice     = c( list_model_choice, "AR2+incpt+vacancy_yoy+omxr_qoq",
-                             "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy",
-                             "AR2+incpt+survreta_lvl+survind_lvl+survind_biud",
-                             "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy+survreta_lvl",
-                             "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy+survreta_lvl+survind_lvl",
-                             "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy+survreta_lvl+survind_lvl+survind_biud",
-                             "AR2+incpt+vacancy_yoy+omxr_qoq+survreta_lvl",
-                             "AR2+incpt+retail_yoy+survind_lvl" )
+  list_NIM = c( "AR0+incpt", "AR2+incpt" )                           # No     Indicator Models
+  list_SIM = paste( "AR2+incpt", list_name_x, sep = "+" ); list_SIM  # Single Indicator Models
+
+  ### create models with two indicators: DIM
+  list_name_xx = combn( list_name_x, 2); dim( list_name_xx ); list_name_xx[,1]
+  ### remove pairs with the same x
+  list_varname_unique = unique( sapply( list_name_x, function(x) strsplit( x, "_" ) %>% unlist %>% `[[`(1) ) ); list_varname_unique
+  ### loop over list_varname_unique
+  indx_doubles = sapply( list_varname_unique, function( sx ){ # sx = list_varname_unique[1]; sx
+    
+    which( apply( list_name_xx, 2, function( pair_sx ) all( grepl( sx, pair_sx ) ) ) )
+    
+  })
+  ### remove one variable with two transformations
+  list_name_xx = list_name_xx[, -( indx_doubles %>% unlist )  ]; dim( list_name_xx ); list_name_xx[, 1]  
+  list_DIM     = paste( "AR2+incpt", apply( list_name_xx, 2, function(x) paste( x, collapse = "+" ) ), sep = "+" ); length( list_DIM )
+
+  ### create all combinations of three indicators: TIM
+  list_name_xxx = combn( list_name_x, 3); dim( list_name_xxx ); list_name_xxx[,1]
+  ### remove triples with the same x: loop over sx
+  indx_triples = sapply( list_varname_unique, function(sx){
+    
+    which( apply( list_name_xxx, 2, function( triple_sx ) all( grepl( sx, triple_sx ) ) ) )
+    
+  })
+  list_name_xxx = list_name_xxx[, -( indx_triples %>% unlist )  ]; dim( list_name_xxx ); list_name_xxx[, 1]
+  ### remove doubles with the same x: loop over sx
+  indx_doubles_in_triples = sapply( list_varname_unique, function(sx){
+    # sx = list_varname_unique[1]; sx 
+    # triple_sx = list_name_xxx[,1]; triple_sx
+    which( apply( list_name_xxx, 2, function( triple_sx ) sum( grepl( sx, triple_sx ) ) == 2 ) )
+    
+  })
+  list_name_xxx = list_name_xxx[, -( indx_doubles_in_triples %>% unlist )  ]; dim( list_name_xxx ); list_name_xxx[, 1]; 
+   
+  if( FALSE ){ 
+    # list_model_choice_tmp = c( "AR0+incpt", "AR2+incpt", paste( "AR2+incpt", list_name_x, sep = "+") )
+    # list_model_choice     = list_model_choice_tmp[ -which( list_model_choice_tmp == "AR2+incpt+incpt" ) ]
+    # 
+    # list_model_choice     = c( list_model_choice, "AR2+incpt+vacancy_yoy+omxr_qoq",
+    #                            "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy",
+    #                            "AR2+incpt+survreta_lvl+survind_lvl+survind_buid",
+    #                            "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy+survreta_lvl",
+    #                            "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy+survreta_lvl+survind_lvl",
+    #                            "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy+survreta_lvl+survind_lvl+survind_buid",
+    #                            "AR2+incpt+vacancy_yoy+omxr_qoq+survreta_lvl",
+    #                            "AR2+incpt+retail_yoy+survind_lvl" )
+    
+    #list_model_choice = c( "AR2+incpt+expt_yoy" ) #,"AR2+incpt+expt_qoq""AR2+incpt+vacancy_yoy+omxr_qoq","AR2+incpt+vacancy+survindu","AR2+incpt+vacancy+survbuid")
+    #"AR2+incpt+iip_yoy","AR2+incpt+iip_qoq""AR2+incpt+m3_yoy","AR2+incpt+m3_qoq"# "AR2+incpt+vacancy_lvl","AR2+incpt+vacancy_yoy","AR2+incpt+vacancy_qoq"
+    # c( "AR0+incpt", "AR2+incpt", "AR2+incpt+survindu", "AR2+incpt+vacancy", "AR2+incpt+upers",
+    #   "AR2+incpt+survbuid", "AR2+incpt+survbuid_diq" )
+    
+    #    list_model_choice = c( "AR2+incpt+vacancy_yoy+omxr_qoq+survreta_lvl+retail_yoy+survind_lvl+survind_biud" ) 
+  }
+
+  ### create MIM: ManyIndicatorModels (hand-picked regressors)
+  name4mim = c( "survindu","survbuid","survreta","retail","vacancy","iip","omxr","expt","irate3m"  )
   
-  #list_model_choice = c( "AR2+incpt+expt_yoy" ) #,"AR2+incpt+expt_qoq""AR2+incpt+vacancy_yoy+omxr_qoq","AR2+incpt+vacancy+survindu","AR2+incpt+vacancy+survbuid")
-  #"AR2+incpt+iip_yoy","AR2+incpt+iip_qoq""AR2+incpt+m3_yoy","AR2+incpt+m3_qoq"# "AR2+incpt+vacancy_lvl","AR2+incpt+vacancy_yoy","AR2+incpt+vacancy_qoq"
-  # c( "AR0+incpt", "AR2+incpt", "AR2+incpt+survindu", "AR2+incpt+vacancy", "AR2+incpt+upers",
-  #   "AR2+incpt+survbuid", "AR2+incpt+survbuid_diq" )
+  ### select transformations of the chosen names
+  list_name4mim     = list_name_x[ lapply( name4mim, function(sx) grep( paste0("^",sx), list_name_x ) ) %>% unlist ]; list_name4mim
+  list_name4mim_all = combn( list_name4mim, length( name4mim ) ); dim( list_name4mim_all )
+  list_name4mim_all[,1]
+
+  ###remove models with more than one incidence of a handpicked indicator
+  indx4mim_single = lapply( name4mim, function( sx ){
   
-  #    list_model_choice = c( "AR2+incpt+vacancy_yoy+omxr_qoq+survreta_lvl+retail_yoy+survind_lvl+survind_biud" ) 
+      apply( list_name4mim_all, 2, function( x ) length( grep( sx, x ) ) == 1 )
   
-  list_lmbd_set  = c( "diffuse" ,"ccm2015") #   
-  list_SV_switch = c( "SV-OFF","SV-ON")
+  })
+  indx4mim = which( apply( do.call( "rbind", indx4mim_single), 2, sum ) == length( name4mim ) )
+  length( indx4mim )
+  list_name4mim_sngl = list_name4mim_all[, indx4mim ]
+  list_MIM = paste( "AR2+incpt", apply( list_name4mim_sngl, 2, function(x) paste( x, collapse = "+" ) ), sep = "+" ); length( list_MIM )
+
+  list_MIM[ 1:2 ]
+  
+  set.seed( 17 )
+  rndm_mim = sample( seq(1, length( list_MIM ) ) , 100, replace = FALSE, prob = NULL); print( rndm_mim )
+  #rndm_mim = c( 2813, 1143,  560, 2209, 1370,  583, 1400, 3774,   82, 2405 )
+  #rndm_mim = 1:10
+  #  list_XIM = list( NIM = list_NIM, SIM = list_SIM ); 
+  #  list_XIM = list( DIM = list_DIM ); 
+  list_XIM = list( MIM = list_MIM ); 
+  list_lambdaset = c(  "diffuse" , "ccm2015" , "bbb2018" ) #  
+  list_SV_switch = c( "SV-OFF",  "SV-ON"   )    #[ rndm_mim ]
   
   
   ###loop over fcst horizons
-  for( fo in seq_along(opt$fcst_orgn) ){ #fcst_orgn = opt$fcst_orgn[ 1 ]; fcst_orgn 
+  for( fo in seq_along(opt$fcst_orgn) ){ # fo = 4
     
-    fcst_orgn = opt$fcst_orgn[ fo ]  
+    fcst_orgn = opt$fcst_orgn[ fo ] ; fcst_orgn 
     
-    #loop over list_lmbd_set
-    for( k in seq_along( list_lmbd_set ) ){
+    #loop over list_lambdaset
+    for( k in seq_along( list_lambdaset ) ){
       
-      lmbd_set = list_lmbd_set[ k ]; 
+      lambdaset = list_lambdaset[ k ]; 
       
       #loop_SV_switch = lapply( list_SV_switch, function(SV_switch){
       for( sv in seq_along(list_SV_switch) ){
@@ -540,1070 +657,495 @@ if( FALSE ){
         # sv = 1;[1:2]
         SV_switch = list_SV_switch[ sv ]; SV_switch
         
-        for(j_mdl in seq_along(list_model_choice) ){ # j_mdl = 1 
+        for( xim in seq_along( names( list_XIM) ) ){ #xim = 1
           
-          model_choice = list_model_choice[ j_mdl ]; print( paste( fcst_orgn, lmbd_set, SV_switch, model_choice ) )
-          
-          fcst_orgn = "fo1"; lmbd_set = "diffuse"; SV_switch    = "SV-OFF"; model_choice = "AR2+incpt" #+retail_yoy+survindu_lvl
-          
-          list_fcst_trgt = seq( opt$fcst_trgt[["beg"]], opt$fcst_trgt[["end"]], by = "3 months")
-          
-          ### loop over fcst targets for the specific fcst origin
-          list_mtsyx_fo = lapply( list_fcst_trgt, function(j_fcst_trgt_date){ # j_fcst_trgt_date = list_fcst_trgt[56]; j_fcst_trgt_date 
-            
-            
-            j_fcst_trgt_yyqq = c( year(j_fcst_trgt_date), quarter(j_fcst_trgt_date) )      
-            j_fcst_orgn_date = j_fcst_trgt_date + months( gsub( "fo","",fcst_orgn ) %>% as.integer - 3 ); j_fcst_orgn_date 
-            
-            y_vntg = list.files( path$vntg, pattern = paste(j_fcst_orgn_date, fcst_orgn, sep = "_" ) )
-            x_vntg_all = list.files( path$vntg, pattern = paste0("^tsx.*",j_fcst_orgn_date ) ); x_vntg_all
-            
-            ### select indicators
-            model_choice_all = strsplit( model_choice, "+", fixed = T ) %>% unlist
-            model_choice_sel = sapply( model_choice_all, function( i_model ) grep( paste0(i_model,"_[0-9]{4}"), x_vntg_all ) ) %>% unlist; model_choice_sel
-            x_vntg_all[ model_choice_sel ]
-            
-            
-            list_dbyx = lapply( c( y_vntg, x_vntg_all[ model_choice_sel ] ), function(x_vntg){ # x_vntg = x_vntg_all[ model_choice_sel ][2]; x_vntg
-              
-              dbx_tmp = read.csv( paste0( path$vntg, x_vntg) )
-              ### drop year, period columns
-              dbx = ts( dbx_tmp, start = c(dbx_tmp$year[1],dbx_tmp$period[1]), frequency = 4 )[, -c(1,2) ]
-              if( is.null(colnames( dbx ) ) ){
+          xim2psql = names( list_XIM)[ xim ]
+          list_model_choice = list_XIM[[ xim2psql ]]; #print( names( list_XIM)[ xim ] )  
+                 
+          for(j_mdl in seq_along(list_model_choice) ){ #  j_mdl = 4; 
                 
-                if( grepl( "incpt", x_vntg ) ) dbx_name = "incpt"
+
+                model_choice = list_model_choice[ j_mdl ]; 
                 
-              }else{
+                 
                 
-                dbx_name = colnames( dbx ) 
+                #
+                # fcst_orgn = "fo1"; lambdaset = "diffuse"; SV_switch    = "SV-ON"; xim2psql = "MIM";  model_choice =  list_MIM[[1]]
+                # #  model_choice = "AR0+incpt" model_choice = "AR2+incpt" #+retail_yoy+survindu_lvl
+                # model_choice = "AR2+incpt+survindu_lvl+survbuid_diq+survreta_lvl+retail_qoq+vacancy_yoy+iip_qoq+omxr_qoq+expt_yoy+irate3m_qoq"
+                print( paste( xim2psql, fcst_orgn, lambdaset, SV_switch, model_choice ) )
                 
-              } 
-              
-              list( dbx, dbx_name )
-              
-            }) 
-            
-            mtsyx_vntg = do.call( "cbind", lapply(list_dbyx, `[[`, 1) )
-            colnames( mtsyx_vntg ) = lapply(list_dbyx, `[[`, 2 ) %>% unlist
-            
-            ### set model specification
-            tsx_fcst_aux = window( mtsyx_vntg, start = j_fcst_trgt_yyqq, end = j_fcst_trgt_yyqq ); tsx_fcst_aux
-            
-            tsx_name = colnames(tsx_fcst_aux)[ which( !is.na(tsx_fcst_aux) ) ] 
-            
-            ### put incpt in the first column
-            tsx_name_incpt_first = c( "incpt", tsx_name[ -which(tsx_name == "incpt") ] ); tsx_name_incpt_first
-            
-            if( grepl( "AR0", model_choice ) ){
-              
-              y_L_indx = grep( paste0( opt$sy,"_L" ), tsx_name_incpt_first )
-              if( length( y_L_indx ) > 0 ) tsx_name_incpt_first = tsx_name_incpt_first[ -y_L_indx ] 
-              
-            } 
-            
-            tsx_name_incpt_first
-            tsx_name_incpt_first_cln = tsx_name_incpt_first; 
-            ### remove lagged indicators if contemporaneous values are available
-            if( any( names( model_choice_sel ) != "incpt" ) ){
-              
-              names_not_incpt = names( model_choice_sel )[ -which( names( model_choice_sel ) == "incpt") ]; names_not_incpt
-              
-              list_indx = lapply( names_not_incpt, function( sx ){ # sx = names_not_incpt[1]; sx
-                ##check if there are any contemporaneous values 
-                indx_sx = grep( paste0( sx,".*[^L]{1}[^0-9]{1}$" ), tsx_name_incpt_first )
-                if( length(indx_sx) > 0 ){
+                list_fcst_trgt = seq( opt$fcst_trgt[["beg"]], opt$fcst_trgt[["end"]], by = "3 months" )
+                
+                ### loop over fcst targets for the specific fcst origin
+                list_mtsyx_fo = lapply( list_fcst_trgt, function(j_fcst_trgt_date){ # j_fcst_trgt_date = list_fcst_trgt[1]; j_fcst_trgt_date # 56
                   
-                  indx_ud = grep( paste0( sx,".*[L]{1}[0-9]{1}$" ), tsx_name_incpt_first )
                   
-                }else{
+                  j_fcst_trgt_yyqq = c( year(j_fcst_trgt_date), quarter(j_fcst_trgt_date) )      
+                  j_fcst_orgn_date = j_fcst_trgt_date + months( gsub( "fo","",fcst_orgn ) %>% as.integer - 3 ); j_fcst_orgn_date 
                   
-                  indx_ud = integer(0)
+                  y_vntg = list.files( path$vntg, pattern = paste(j_fcst_orgn_date, fcst_orgn, sep = "_" ) )
+                  x_vntg_all = list.files( path$vntg, pattern = paste0("^tsx.*",j_fcst_orgn_date ) ); x_vntg_all
                   
+                  ### select indicators
+                  model_choice_all = strsplit( model_choice, "+", fixed = T ) %>% unlist
+                  model_choice_sel = sapply( model_choice_all, function( i_model ) grep( paste0(i_model,"_[0-9]{4}"), x_vntg_all ) ) %>% unlist; model_choice_sel
+                  x_vntg_all[ model_choice_sel ]
+                  
+                  
+                  list_dbyx = lapply( c( y_vntg, x_vntg_all[ model_choice_sel ] ), function(x_vntg){ # x_vntg = x_vntg_all[ model_choice_sel ][2]; x_vntg
+                    
+                    dbx_tmp = read.csv( paste0( path$vntg, x_vntg) )
+                    ### drop year, period columns
+                    dbx = ts( dbx_tmp, start = c(dbx_tmp$year[1],dbx_tmp$period[1]), frequency = 4 )[, -c(1,2) ]
+                    if( is.null(colnames( dbx ) ) ){
+                      
+                      if( grepl( "incpt", x_vntg ) ) dbx_name = "incpt"
+                      
+                    }else{
+                      
+                      dbx_name = colnames( dbx ) 
+                      
+                    } 
+                    
+                    list( dbx, dbx_name )
+                    
+                  }) 
+
+                  mtsyx_vntg = do.call( "cbind", lapply(list_dbyx, `[[`, 1) )
+                  colnames( mtsyx_vntg ) = lapply(list_dbyx, `[[`, 2 ) %>% unlist
+                  
+                  ### set model specification
+                  tsx_fcst_aux = window( mtsyx_vntg, start = j_fcst_trgt_yyqq, end = j_fcst_trgt_yyqq ); tsx_fcst_aux
+                  
+                  tsx_name = colnames(tsx_fcst_aux)[ which( !is.na(tsx_fcst_aux) ) ] 
+                  
+                  ### put incpt in the first column
+                  tsx_name_incpt_first = c( "incpt", tsx_name[ -which(tsx_name == "incpt") ] ); tsx_name_incpt_first
+                  
+                  if( grepl( "AR0", model_choice ) ){
+                    
+                    y_L_indx = grep( paste0( opt$sy,"_L" ), tsx_name_incpt_first )
+                    if( length( y_L_indx ) > 0 ) tsx_name_incpt_first = tsx_name_incpt_first[ -y_L_indx ] 
+                    
+                  } 
+                  
+                  tsx_name_incpt_first
+                  tsx_name_incpt_first_cln = tsx_name_incpt_first; 
+                  ### remove lagged indicators if contemporaneous values are available
+                  if( any( names( model_choice_sel ) != "incpt" ) ){
+                    
+                    names_not_incpt = names( model_choice_sel )[ -which( names( model_choice_sel ) == "incpt") ]; names_not_incpt
+                    
+                    list_indx = lapply( names_not_incpt, function( sx ){ # sx = names_not_incpt[1]; sx
+                      ##check if there are any contemporaneous values 
+                      indx_sx = grep( paste0( sx,".*[^L]{1}[^0-9]{1}$" ), tsx_name_incpt_first )
+                      if( length(indx_sx) > 0 ){
+                        
+                        indx_ud = grep( paste0( sx,".*[L]{1}[0-9]{1}$" ), tsx_name_incpt_first )
+                        
+                      }else{
+                        
+                        indx_ud = integer(0)
+                        
+                      } 
+                      indx_ud
+                    })
+                    if( length( list_indx %>% unlist ) > 0 ){
+                      
+                      tsx_name_incpt_first_cln = tsx_name_incpt_first[ -(list_indx %>% unlist) ]
+                      
+                    }
+                    
+                  }
+                  tsx_name_incpt_first_cln
+                  
+                  tsx_fcst = tsx_fcst_aux[ , tsx_name_incpt_first_cln, drop = F ]; tsx_fcst
+                  
+                  tsyx_estn = na.omit( mtsyx_vntg )
+                  
+                  tsy_estn = tsyx_estn[, opt$sy  , drop = F]
+                  tsx_estn = tsyx_estn[, tsx_name_incpt_first_cln, drop = F]
+                  
+                  length( tsy_estn ); dim( tsx_estn )
+                  
+                  ### create bridge equation transformation on available months
+                  if( xim2psql == "MIM" ){
+                    
+                      ### drop incpt and AR time series
+                      regname_drop = grep( "(^incpt|^AR)", model_choice_all   )
+    
+                      regname = model_choice_all[ -regname_drop ]; regname; length( regname )
+                      
+                      ### average avaibable monthly time series
+                      list_aggr = lapply( regname, function( sx ){ # sx = regname[ 3 ]; sx
+                        
+                        sx_m123 = colnames( tsx_estn )[ grep( sx, colnames(tsx_estn) ) ]; sx_m123
+                        
+                        sx_ud = ifelse( all( grepl( "_L[1-9]{1}$", sx_m123 ) ), paste0(sx, str_extract( sx_m123[1], "_L[1-9]{1}$" ) ), sx )
+                        
+                        vx_estn_aggr = apply( tsx_estn[ , grep( sx, colnames(tsx_estn) ), drop = F ], 1, mean )
+                        tsx_estn_aggr = ts( vx_estn_aggr, start = start(tsx_estn), frequency = frequency( tsx_estn ) )
+                        
+                        ### aggregate tsx_fcst
+                        cx_fcst_aggr  = apply( tsx_fcst[ , grep( sx, colnames(tsx_fcst) ), drop = F ], 1, mean )
+                        tsx_fcst_aggr = ts( cx_fcst_aggr, start = start(tsx_fcst), frequency = frequency( tsx_fcst ) ) 
+                      
+                        
+                        list( tsx_estn_aggr = tsx_estn_aggr, tsx_fcst_aggr = tsx_fcst_aggr, names = sx_ud )
+                      })
+                      list_aggr_estn = lapply( list_aggr, "[[", 1 )
+                      list_aggr_fcst = lapply( list_aggr, "[[", 2 )
+                      names( list_aggr_estn ) = names( list_aggr_fcst ) = sapply( list_aggr, "[[", 3 )
+                      
+                      ### add L1 to the names when necessary
+                      names_estn_incpt_ar = colnames(tsx_estn)[ grep( paste0("(incpt|^",opt$sy,"_L)" ), colnames(tsx_estn) ) ]
+                      names_fcst_incpt_ar = colnames(tsx_fcst)[ grep( paste0("(incpt|^",opt$sy,"_L)" ), colnames(tsx_fcst) ) ]
+                      
+                      list_estn_incpt_ar  = lapply( names_estn_incpt_ar, function( sx ) tsx_estn[ , sx ] )
+                      list_fcst_incpt_ar  = lapply( names_fcst_incpt_ar, function( sx ) tsx_fcst[ , sx ] )
+                      names( list_estn_incpt_ar ) = names_estn_incpt_ar
+                      names( list_fcst_incpt_ar ) = names_fcst_incpt_ar
+                      
+                      tsx_estn = do.call( "cbind", c( list_estn_incpt_ar, list_aggr_estn ) ); 
+                      tsx_fcst = do.call( "cbind", c( list_fcst_incpt_ar, list_aggr_fcst ) ); 
+                  
+                  }
+
+                  # head( tsx_estn, drop = F )
+                  list( tsy_estn = tsy_estn, tsx_estn = tsx_estn, tsx_fcst = tsx_fcst )
+                })
+                names( list_mtsyx_fo ) = list_fcst_trgt
+                
+                #names( list_mtsyx_fo )
+                ##list_mtsyx_fo[[ "2017-12-01" ]]
+                #################################################################
+                ###
+                #################################################################
+                
+                # fcst_summ = sapply( names( list_mtsyx_fo ), function(otrn_date){ #  otrn_date = as.Date( "2009-12-01" )
+                # 
+                ptm <- proc.time()
+                cl = makeCluster( detectCores() )
+                registerDoParallel(cl)  # .combine = "rbind" %do% %dopar%
+                fcst_summ = foreach( i = seq_along( names( list_mtsyx_fo ) ), .combine = "rbind", .inorder = T, 
+                                     .packages = c("bayarx", "bayarxsv", "lubridate","coda","scoringRules") ) %dopar% {
+                                    # for( i in seq_along(names( list_mtsyx_fo ))){}                                     i = 1
+   
+                                       otrn_date = names( list_mtsyx_fo )[i]; print(i);print( otrn_date )
+
+                                       mtsyx =list_mtsyx_fo[[ as.character( otrn_date ) ]]
+                                       
+                                       tsy_estn = mtsyx$tsy_estn
+                                       tsy_otrn = window( tsy, start = c(year(otrn_date),quarter(otrn_date)), end = c(year(otrn_date),quarter(otrn_date)) )
+                                       tsx_estn = mtsyx$tsx_estn
+                                       tsx_fcst = mtsyx$tsx_fcst
+                                       
+                                       summary( lm( tsy_estn ~ tsx_estn - 1 ) )
+                                       #cbind( tsy_estn, tsx_estn )
+                                       
+                                       sfile_ud_vint = paste( model_choice, SV_switch, sep = "_"); sfile_ud_vint
+                                       
+                                       opt_mcmc             <- list()
+                                       opt_mcmc$draws       <- 50000
+                                       opt_mcmc$burnin      <- 10000
+                                       opt_mcmc$thinpara    <- 10
+                                       opt_mcmc$thinlatent  <- 10
+                                       opt_mcmc$priorphi_a0 <- 20
+                                       opt_mcmc$priorphi_b0 <- 1.5
+                                       
+                                       ###options for Bayesian regression: see p. 845
+                                       opt_prior <- list()
+                                       if( lambdaset == "diffuse"){ lmbd <- c( 1000000, 1000000, 1 ) }  # shrinkage hyperparameters
+                                       if( lambdaset == "ccm2015"){ lmbd <- c(     0.2,     0.2, 1 ) }  # shrinkage hyperparameters
+                                       if( lambdaset == "bbb2018"){ lmbd <- c(     0.4,     0.4, 1 ) }  # shrinkage hyperparameters
+                                       
+                                       
+                                       ###priors for volatility
+                                       opt_prior$variSigma0   = 4
+                                       opt_prior$muPhi        = 0.035; #0.035
+                                       opt_prior$priordfPhi   = 5
+                                       opt_prior$arForPriorPi = 4;  # AR(4) for prior on slope coefficients
+                                       
+                                       ### collect all options
+                                       opt$mcmc  = opt_mcmc
+                                       opt$prior = opt_prior
+                                       
+                                       if( fcst_orgn == "fo1" | fcst_orgn == "fo2" ) horz = 1  
+                                       if( fcst_orgn == "fo3" | fcst_orgn == "fo4" ) horz = 0
+                                       
+                                       
+                                       #cat("\nhorz ", horz )
+                                       
+                                       if( grepl( "^AR0", model_choice ) ){
+                                         
+                                         tsx_name = "incpt"
+                                         
+                                       }else{
+                                         
+                                         tsx_name = colnames( tsx_estn )
+                                         
+                                       }
+                                       tsx_name
+                                       ### specify priors
+                                       nylag    <- length( grep( paste0( opt$sy,"_L[1-9]{1}"), tsx_name ) ); nylag
+                                       ncoef    <- ifelse( grepl( "^AR0", model_choice ),       1, dim( tsx_estn )[2] ); ncoef # number of coefficients in the model
+                                       
+                                       
+                                       priorMean <- matrix( rep( 0, ncoef ), ncol = 1 )
+                                       priorVari <- diag( ncoef ) * 0.01
+                                       
+                                       # lmbd = opt_prior$lmbd; lmbd
+                                       
+                                       if( nylag > 0 ) for( l in 1:nylag) priorVari[ l+1, l+1] <- ( lmbd[1] / ( l + horz )^(lmbd[3]) )^2
+                                       
+                                       ### build a prior: adjust prior for intercept ( the only scale-dependent coefficient in the AR model )
+                                       ### ols estimation
+                                       y_sigma2 = doArima( tsy_estn, opt_prior$arForPriorPi )
+                                       priorVari[1,1] <- 1000^2 * y_sigma2; priorVari #very loose prior on incpt 
+                                       
+                                       indx <- 1 + nylag; indx
+                                       ### other variables
+                                       if( indx < ncoef ){
+                                         for( l in (indx + 1) : ncoef ){ # l = 9
+                                           
+                                           sx <- tsx_name[ l ]; sx 
+                                           # armod <- arima( tsx_estn[, sx ], order=c( 4, 0, 0 ) ); #cat('\n', sx ); print( armod ); 
+                                           # x_sigma2 <- armod$sigma2
+                                           x_sigma2 = doArima( tsx_estn[, sx ], 4 ); x_sigma2
+
+                                           ###determine whether it is a lagged variable or not
+                                           if( length( grep( "_L " , sx) ) == 0 ) dLag = 0
+                                           if( length( grep( "_L1$", sx) ) >  0 ) dLag = 1
+                                           if( length( grep( "_L2$", sx) ) >  0 ) dLag = 2
+                                           
+                                           priorVari[ l, l ] = ( y_sigma2 / x_sigma2 ) * ( lmbd[2] * lmbd[1] / ( 1 + dLag + horz ) ^ (lmbd[3]) )^2
+                                           
+                                         }
+                                       }
+                                       rownames(priorVari) <- tsx_name; priorVari
+                                       
+                                       # diag( priorVari )
+                                       
+                                       vy <- matrix( tsy_estn, ncol = 1)
+                                       mx <- matrix( tsx_estn, nrow = nrow(vy) ); # cbind( vy, mx)
+                                       
+                                       if( SV_switch == "SV-OFF" ){
+                                         
+                                         #print( cbind(vy,mx) )
+                                         #print( summary( lm(vy ~ mx - 1) ) )
+                                         
+                                         # draws <- RcppAR( opt_mcmc$draws, opt_mcmc$burnin, opt_mcmc$thinpara, priorMean, priorVari, vy, mx )$mstore
+                                         draws <- bayarx( opt_mcmc$draws, opt_mcmc$burnin, opt_mcmc$thinpara, priorMean, priorVari, vy, mx )$mstore
+                                         
+                                         dim( draws ); str( draws )
+                                         
+                                         colnames( draws) <- c( "sigma", tsx_name ); head(draws) 
+                                         
+                                         res_coda  <- mcmc( draws )
+                                         
+                                         ###compute effective size
+                                         ess_ud <- (opt_mcmc$draws / opt_mcmc$thinpara) / effectiveSize( res_coda ) 
+                                         names( ess_ud ) <- paste( "ess", colnames(draws), sep = "_" ); ess_ud
+                                         
+                                         geweke_diag <- geweke.diag( res_coda , frac1=0.1, frac2=0.5)
+                                         geweke_diag_ud <- c( geweke_diag[[2]], geweke_diag[[1]] )
+                                         names( geweke_diag_ud ) <- paste0( "geweke_", c( "frac1", "frac2", colnames( draws ) ) )
+                                         # geweke_diag_ud
+                                         
+                                         ### collect all diagnostics
+                                         diag_ud <- c( ess_ud, geweke_diag_ud )
+                                         
+                                         ## one-step ahead volatility h_{T+1}
+                                         predvol <- draws[,"sigma", drop = F] 
+                                         
+                                         ## one-step ahead posterior predictive distribution
+                                         preddraws <- rnorm( nrow(predvol), draws[, tsx_name ] %*% matrix( tsx_fcst, ncol = 1 ), sqrt( predvol ) )
+                                         summary( preddraws )
+                                         
+                                         # plot( density(draws[, "survindu_m3_lvl"] ) )
+                                         # 
+                                         # plot( density(draws[, "y_L2"] ) )
+                                         # 
+                                         # ols = lm( tsy ~ tsx - 1 ); summary( ols )
+                                         # summary( draws[, "survindu_m3_lvl"] )  
+                                         
+                                         
+                                       }
+                                       if( SV_switch == "SV-ON" ){
+                                         
+                                         ###priors for volatility
+                                         variSigma0  = opt_prior$variSigma0
+                                         muPhi       = opt_prior$muPhi ; #0.035
+                                         priordfPhi  = opt_prior$priordfPhi
+                                         
+                                         #use pre-sample to initialise period 0 volatiliy: here use the estimation sample
+                                         meanSigma0 = log( y_sigma2 ); meanSigma0
+                                         
+                                         ptm <- proc.time()
+                                         
+                                         listMCMC <- bayarxsv( opt_mcmc$draws, opt_mcmc$burnin, opt_mcmc$thinpara, priorMean, priorVari, meanSigma0, variSigma0, muPhi, priordfPhi, vy, mx )
+                                         str( listMCMC )
+                                         proc.time() - ptm
+                                         
+                                         # str( listMCMC )
+                                         
+                                         mPi           <- listMCMC[["mPi"]]
+                                         mLogSigma     <- listMCMC[["mLogSigma"]]
+                                         vPhi          <- listMCMC[["vPhi"]]
+                                         vLogSigmaPred <- listMCMC[["vLogSigmaPred"]]
+                                         
+                                         summary( vLogSigmaPred )
+                                         summary( mLogSigma )
+                                         
+                                         head( mLogSigma )
+                                         
+                                         rbind( mean = apply(  mPi , 2, mean ), sd = apply(  mPi, 2, sd ) )
+                                         rbind( mean = apply(  vPhi, 2, mean ), sd = apply(  vPhi, 2, sd ) )
+                                         
+                                         startSigma <- as.Date( sprintf("%i-%i-01",start( tsy )[1],start( tsy )[2] * 3 ) ) %m-% months(3); startSigma
+                                         
+                                         ###draw stochastic volatility
+                                         sigmaQ50 <- ts( apply( exp( mLogSigma / 2 ), 2, median                 ), start = c( year(startSigma), quarter(startSigma) ), frequency = 4 )
+                                         sigmaQ95 <- ts( apply( exp( mLogSigma / 2 ), 2, quantile, probs = 0.95 ), start = c( year(startSigma), quarter(startSigma) ), frequency = 4 )
+                                         sigmaQ05 <- ts( apply( exp( mLogSigma / 2 ), 2, quantile, probs = 0.05 ), start = c( year(startSigma), quarter(startSigma) ), frequency = 4 )
+                                         
+                                         #  pdf( file = paste0(path$plot, "SVSAMPLE", sfile_ud_vint,".pdf"  ) )
+                                         # plot( sigmaQ50, col = "red", type = "l", lwd = 2, ylim =c( 0, max(sigmaQ95) ), main = "Stochastic Volatility (sd)" )
+                                         # lines(sigmaQ95, col = "blue")
+                                         # lines(sigmaQ05, col = "blue")
+                                         #  dev.off()
+                                         
+                                         draws <- cbind(  vPhi , mPi )
+                                         colnames( draws) <- c(  "phi", tsx_name ); head(draws) 
+                                         
+                                         res_coda  <- mcmc( draws )
+                                         
+                                         ###compute effective size
+                                         ess_ud <- (opt_mcmc$draws / opt_mcmc$thinpara) / effectiveSize( res_coda ) 
+                                         names( ess_ud ) <- paste( "ess", colnames(draws), sep = "_" )
+                                         
+                                         geweke_diag <- geweke.diag( res_coda , frac1=0.1, frac2=0.5)
+                                         geweke_diag_ud <- c( geweke_diag[[2]], geweke_diag[[1]] )
+                                         names( geweke_diag_ud ) <- paste0( "geweke_", c( "frac1", "frac2", "phi", tsx_name ) )
+                                         geweke_diag_ud
+                                         
+                                         ### collect all diagnostics
+                                         diag_ud <- c( ess_ud, geweke_diag_ud )
+                                         
+                                         ## one-step ahead log-volatility h_{T+1}
+                                         predvol <- vLogSigmaPred; head( predvol )
+                                         
+                                         ## one-step ahead posterior predictive distribution
+                                         preddraws <- rnorm( length(predvol), mPi %*% matrix( tsx_fcst, ncol = 1 ), exp( predvol / 2 ) ); head( preddraws )
+                                         summary( preddraws )
+                                         summary( exp( predvol / 2 ) )
+                                         
+                                       }
+                                       
+                                       crps = crps_sample( y = c( tsy_otrn ), dat = preddraws )
+                                       logs = logs_sample( y = c( tsy_otrn ), dat = preddraws )
+                                       pred_qntl = quantile( preddraws, probs = opt$preddraws_quantile )
+                                       pred_median = median( preddraws )
+                                       names( pred_qntl ) = opt$preddraws_quantile_name
+                                       # plot( density( preddraws )); abline( v = c( tsy_otrn ), lwd = 2, col = "red" )
+                                       c( otrn = tsy_otrn, mean = mean(preddraws), median = pred_median, erro_median = tsy_otrn - pred_median, logs = logs, crps = crps, pred_qntl )
+                                                
+                
                 } 
-                indx_ud
-              })
-              if( length( list_indx %>% unlist ) > 0 ){
+                stopCluster(cl)
+                proc.time() - ptm
                 
-                tsx_name_incpt_first_cln = tsx_name_incpt_first[ -(list_indx %>% unlist) ]
+                fcst_sum_beg = as.Date( names( list_mtsyx_fo )[1] ); fcst_sum_beg
                 
-              }
-              
-            }
-            tsx_name_incpt_first_cln
-            
-            tsx_fcst = tsx_fcst_aux[ , tsx_name_incpt_first_cln, drop = F ]; tsx_fcst
-            
-            tsyx_estn = na.omit( mtsyx_vntg )
-            
-            tsy_estn = tsyx_estn[, opt$sy  , drop = F]
-            tsx_estn = tsyx_estn[, tsx_name_incpt_first_cln, drop = F]
-            
-            # head( tsx_estn, drop = F )
-            list( tsy_estn = tsy_estn, tsx_estn = tsx_estn, tsx_fcst = tsx_fcst )
-          })
-          names( list_mtsyx_fo ) = list_fcst_trgt
-          
-          #names( list_mtsyx_fo )
-          ##list_mtsyx_fo[[ "2017-12-01" ]]
-          #################################################################
-          ###
-          #################################################################
-          
-          # fcst_summ = sapply( names( list_mtsyx_fo ), function(otrn_date){ #  otrn_date = as.Date( "2009-12-01" )
-          # 
-          ptm <- proc.time()
-          cl = makeCluster( detectCores() )
-          registerDoParallel(cl)  # .combine = "rbind" %do% %dopar%
-          fcst_summ = foreach( i = seq_along( names( list_mtsyx_fo ) ), .combine = "rbind", .inorder = T, 
-                               .packages = c("bayarx", "bayarxsv", "lubridate","coda","scoringRules") ) %dopar% {
-                                 #i = 56  
-                                 otrn_date = names( list_mtsyx_fo )[i]; otrn_date
-                                 
-                                 
-                                 mtsyx =list_mtsyx_fo[[ as.character( otrn_date ) ]]
-                                 
-                                 tsy_estn = mtsyx$tsy_estn
-                                 tsy_otrn = window( tsy, start = c(year(otrn_date),quarter(otrn_date)), end = c(year(otrn_date),quarter(otrn_date)) )
-                                 tsx_estn = mtsyx$tsx_estn
-                                 tsx_fcst = mtsyx$tsx_fcst
-                                 
-                                 #summary( lm( tsy_estn ~ tsx_estn - 1 ) )
-                                 #cbind( tsy_estn, tsx_estn )
-                                 
-                                 sfile_ud_vint = paste( model_choice, SV_switch, sep = "_"); sfile_ud_vint
-                                 
-                                 opt_mcmc             <- list()
-                                 opt_mcmc$draws       <- 50000
-                                 opt_mcmc$burnin      <- 10000
-                                 opt_mcmc$thinpara    <- 10
-                                 opt_mcmc$thinlatent  <- 10
-                                 opt_mcmc$priorphi_a0 <- 20
-                                 opt_mcmc$priorphi_b0 <- 1.5
-                                 
-                                 ###options for Bayesian regression: see p. 845
-                                 opt_prior <- list()
-                                 if( lmbd_set == "diffuse")      { lmbd <- c( 1000000, 1000000, 1 ) }  # shrinkage hyperparameters
-                                 if( lmbd_set == "ccm2015"){ lmbd <- c(     0.2,     0.2, 1 ) }  # shrinkage hyperparameters
-                                 
-                                 
-                                 ###priors for volatility
-                                 opt_prior$variSigma0   = 4
-                                 opt_prior$muPhi        = 0.035; #0.035
-                                 opt_prior$priordfPhi   = 5
-                                 opt_prior$arForPriorPi = 4;  # AR(4) for prior on slope coefficients
-                                 
-                                 ### collect all options
-                                 opt$mcmc  = opt_mcmc
-                                 opt$prior = opt_prior
-                                 
-                                 if( fcst_orgn == "fo1" | fcst_orgn == "fo2" ) horz = 1  
-                                 if( fcst_orgn == "fo3" | fcst_orgn == "fo4" ) horz = 0
-                                 
-                                 
-                                 #cat("\nhorz ", horz )
-                                 
-                                 if( grepl( "^AR0", model_choice ) ){
-                                   
-                                   tsx_name = "incpt"
-                                   
-                                 }else{
-                                   
-                                   tsx_name = colnames( tsx_estn )
-                                   
-                                 }
-                                 tsx_name
-                                 ### specify priors
-                                 nylag    <- length( grep( paste0( opt$sy,"_L[1-9]{1}"), tsx_name ) ); nylag
-                                 ncoef    <- ifelse( grepl( "^AR0", model_choice ),       1, dim( tsx_estn )[2] ); ncoef # number of coefficients in the model
-                                 
-                                 
-                                 priorMean <- matrix( rep( 0, ncoef ), ncol = 1 )
-                                 priorVari <- diag( ncoef ) * 0.01
-                                 
-                                 # lmbd = opt_prior$lmbd; lmbd
-                                 
-                                 if( nylag > 0 ) for( l in 1:nylag) priorVari[ l+1, l+1] <- ( lmbd[1] / ( l + horz )^(lmbd[3]) )^2
-                                 
-                                 ### build a prior: adjust prior for intercept ( the only scale-dependent coefficient in the AR model )
-                                 ### ols estimation
-                                 y_sigma2 = doArima( tsy_estn, opt_prior$arForPriorPi )
-                                 priorVari[1,1] <- 1000^2 * y_sigma2; priorVari #very loose prior on incpt 
-                                 
-                                 indx <- 1 + nylag; indx
-                                 ### other variables
-                                 if( indx < ncoef ){
-                                   for( l in (indx + 1) : ncoef ){ # l = 4
-                                     
-                                     sx <- tsx_name[ l ]; sx 
-                                     # armod <- arima( tsx_estn[, sx ], order=c( 4, 0, 0 ) ); #cat('\n', sx ); print( armod ); 
-                                     # x_sigma2 <- armod$sigma2
-                                     x_sigma2 = doArima( tsx_estn[, sx ], 4 )
-                                     
-                                     ###determine whether it is a lagged variable or not
-                                     if( length( grep( "_L " , sx) ) == 0 ) dLag = 0
-                                     if( length( grep( "_L1$", sx) ) >  0 ) dLag = 1
-                                     if( length( grep( "_L2$", sx) ) >  0 ) dLag = 2
-                                     
-                                     priorVari[ l, l ] = ( y_sigma2 / x_sigma2 ) * ( lmbd[2] * lmbd[1] / ( 1 + dLag + horz ) ^ (lmbd[3]) )^2
-                                     
-                                   }
-                                 }
-                                 rownames(priorVari) <- tsx_name; priorVari
-                                 
-                                 # diag( priorVari )
-                                 
-                                 vy <- matrix( tsy_estn, ncol = 1)
-                                 mx <- matrix( tsx_estn, nrow = nrow(vy) ); # cbind( vy, mx)
-                                 
-                                 if( SV_switch == "SV-OFF" ){
-                                   
-                                   print( cbind(vy,mx) )
-                                   print( summary( lm(vy ~ mx ) ) )
-                                   
-                                   # draws <- RcppAR( opt_mcmc$draws, opt_mcmc$burnin, opt_mcmc$thinpara, priorMean, priorVari, vy, mx )$mstore
-                                   draws <- bayarx( opt_mcmc$draws, opt_mcmc$burnin, opt_mcmc$thinpara, priorMean, priorVari, vy, mx )$mstore
-                                   
-                                   dim( draws ); str( draws )
-                                   
-                                   colnames( draws) <- c( "sigma", tsx_name ); head(draws) 
-                                   
-                                   res_coda  <- mcmc( draws )
-                                   
-                                   ###compute effective size
-                                   ess_ud <- (opt_mcmc$draws / opt_mcmc$thinpara) / effectiveSize( res_coda ) 
-                                   names( ess_ud ) <- paste( "ess", colnames(draws), sep = "_" ); ess_ud
-                                   
-                                   geweke_diag <- geweke.diag( res_coda , frac1=0.1, frac2=0.5)
-                                   geweke_diag_ud <- c( geweke_diag[[2]], geweke_diag[[1]] )
-                                   names( geweke_diag_ud ) <- paste0( "geweke_", c( "frac1", "frac2", colnames( draws ) ) )
-                                   # geweke_diag_ud
-                                   
-                                   ### collect all diagnostics
-                                   diag_ud <- c( ess_ud, geweke_diag_ud )
-                                   
-                                   ## one-step ahead volatility h_{T+1}
-                                   predvol <- draws[,"sigma", drop = F] 
-                                   
-                                   ## one-step ahead posterior predictive distribution
-                                   preddraws <- rnorm( nrow(predvol), draws[, tsx_name ] %*% matrix( tsx_fcst, ncol = 1 ), sqrt( predvol ) )
-                                   summary( preddraws )
-                                   
-                                   # plot( density(draws[, "survindu_m3_lvl"] ) )
-                                   # 
-                                   # plot( density(draws[, "y_L2"] ) )
-                                   # 
-                                   # ols = lm( tsy ~ tsx - 1 ); summary( ols )
-                                   # summary( draws[, "survindu_m3_lvl"] )  
-                                   
-                                   
-                                 }
-                                 if( SV_switch == "SV-ON" ){
-                                   
-                                   ###priors for volatility
-                                   variSigma0  = opt_prior$variSigma0
-                                   muPhi       = opt_prior$muPhi ; #0.035
-                                   priordfPhi  = opt_prior$priordfPhi
-                                   
-                                   #use pre-sample to initialise period 0 volatiliy: here use the estimation sample
-                                   meanSigma0 = log( y_sigma2 ); meanSigma0
-                                   
-                                   ptm <- proc.time()
-                                   
-                                   listMCMC <- bayarxsv( opt_mcmc$draws, opt_mcmc$burnin, opt_mcmc$thinpara, priorMean, priorVari, meanSigma0, variSigma0, muPhi, priordfPhi, vy, mx )
-                                   str( listMCMC )
-                                   proc.time() - ptm
-                                   
-                                   # str( listMCMC )
-                                   
-                                   mPi           <- listMCMC[["mPi"]]
-                                   mLogSigma     <- listMCMC[["mLogSigma"]]
-                                   vPhi          <- listMCMC[["vPhi"]]
-                                   vLogSigmaPred <- listMCMC[["vLogSigmaPred"]]
-                                   
-                                   summary( vLogSigmaPred )
-                                   summary( mLogSigma )
-                                   
-                                   head( mLogSigma )
-                                   
-                                   rbind( mean = apply(  mPi , 2, mean ), sd = apply(  mPi, 2, sd ) )
-                                   rbind( mean = apply(  vPhi, 2, mean ), sd = apply(  vPhi, 2, sd ) )
-                                   
-                                   startSigma <- as.Date( sprintf("%i-%i-01",start( tsy )[1],start( tsy )[2] * 3 ) ) %m-% months(3); startSigma
-                                   
-                                   ###draw stochastic volatility
-                                   sigmaQ50 <- ts( apply( exp( mLogSigma / 2 ), 2, median                 ), start = c( year(startSigma), quarter(startSigma) ), frequency = 4 )
-                                   sigmaQ95 <- ts( apply( exp( mLogSigma / 2 ), 2, quantile, probs = 0.95 ), start = c( year(startSigma), quarter(startSigma) ), frequency = 4 )
-                                   sigmaQ05 <- ts( apply( exp( mLogSigma / 2 ), 2, quantile, probs = 0.05 ), start = c( year(startSigma), quarter(startSigma) ), frequency = 4 )
-                                   
-                                   #  pdf( file = paste0(path$plot, "SVSAMPLE", sfile_ud_vint,".pdf"  ) )
-                                   # plot( sigmaQ50, col = "red", type = "l", lwd = 2, ylim =c( 0, max(sigmaQ95) ), main = "Stochastic Volatility (sd)" )
-                                   # lines(sigmaQ95, col = "blue")
-                                   # lines(sigmaQ05, col = "blue")
-                                   #  dev.off()
-                                   
-                                   draws <- cbind(  vPhi , mPi )
-                                   colnames( draws) <- c(  "phi", tsx_name ); head(draws) 
-                                   
-                                   res_coda  <- mcmc( draws )
-                                   
-                                   ###compute effective size
-                                   ess_ud <- (opt_mcmc$draws / opt_mcmc$thinpara) / effectiveSize( res_coda ) 
-                                   names( ess_ud ) <- paste( "ess", colnames(draws), sep = "_" )
-                                   
-                                   geweke_diag <- geweke.diag( res_coda , frac1=0.1, frac2=0.5)
-                                   geweke_diag_ud <- c( geweke_diag[[2]], geweke_diag[[1]] )
-                                   names( geweke_diag_ud ) <- paste0( "geweke_", c( "frac1", "frac2", "phi", tsx_name ) )
-                                   geweke_diag_ud
-                                   
-                                   ### collect all diagnostics
-                                   diag_ud <- c( ess_ud, geweke_diag_ud )
-                                   
-                                   ## one-step ahead log-volatility h_{T+1}
-                                   predvol <- vLogSigmaPred; head( predvol )
-                                   
-                                   ## one-step ahead posterior predictive distribution
-                                   preddraws <- rnorm( length(predvol), mPi %*% matrix( tsx_fcst, ncol = 1 ), exp( predvol / 2 ) ); head( preddraws )
-                                   summary( preddraws )
-                                   summary( exp( predvol / 2 ) )
-                                   
-                                 }
-                                 
-                                 crps = crps_sample( y = c( tsy_otrn ), dat = preddraws )
-                                 logs = logs_sample( y = c( tsy_otrn ), dat = preddraws )
-                                 pred_qntl = quantile( preddraws, probs = c(0.005, 0.025, 0.05, 0.165, 0.25, 0.333, 0.50, 0.666, 0.75, 0.835, 0.95, 0.975, 0.9995 ) )
-                                 names( pred_qntl ) = paste0( "Q",names( pred_qntl ) ); pred_qntl
-                                 
-                                 # plot( density( preddraws )); abline( v = c( tsy_otrn ), lwd = 2, col = "red" )
-                                 
-                                 c( otrn = tsy_otrn, mean = mean(preddraws), erro = tsy_otrn - pred_qntl[ "Q50%"], logs = logs, crps = crps, pred_qntl )
-                                 
-                               } 
-          stopCluster(cl)
-          proc.time() - ptm
-          
-          fcst_sum_beg = as.Date( names( list_mtsyx_fo )[1] ); fcst_sum_beg
-          
-          tsfcst_summ = ts( fcst_summ, start = c( year(fcst_sum_beg), quarter(fcst_sum_beg) ), frequency = 4 )
-          
-          
-          head( tsfcst_summ )
-          
-          fcst_title = paste0( model_choice,"_",lmbd_set,"_",SV_switch,"_", fcst_orgn ); fcst_title
-          
-          tsWrite( tsfcst_summ, paste0( path$resu, "fcst_summ_", fcst_title,".csv" ) )
-          
-          pdf( paste0( path$plot, "fcst_otrn_", fcst_title,".pdf"), width = 12, height = 7 )
-          tfplot( ts(0, start = start( tsfcst_summ), end = end(tsfcst_summ), frequency = frequency( tsfcst_summ ) ), 
-                  title = fcst_title, ylab = "", ylim = range( tsfcst_summ[ ,c( "otrn", "q16p5pp", "q83p5pp" ) ] ), col = "gray" )
-          lines( tsfcst_summ[ ,"otrn"], lwd = 2, type = "b" )
-          lines( tsfcst_summ[ ,"q50pp"], col = "red", lwd = 2, type = "b" )
-          lines( tsfcst_summ[ ,"q16p5pp"], col = "blue", lwd = 2 )
-          lines( tsfcst_summ[ ,"q83p5pp"], col = "blue", lwd = 2 )
-          dev.off()
-          
-          
-          tfplot( tsfcst_summ[ ,"crps"], lwd = 2, title = fcst_title, ylab = "crps" )
-          tfplot( tsfcst_summ[ ,"logs"], lwd = 2, title = fcst_title, ylab = "logs" )
-          
-          rmsfe = sqrt( mean( fcst_summ[,"erro_q50pp"]^2 ) ); rmsfe
-          mlogs = mean( fcst_summ[,"logs"] ); mlogs
-          mcrps = mean( fcst_summ[,"crps"] ); mcrps
-          
-          c( rmsfe = rmsfe, mlogs = mlogs, mcrps = mcrps )
-          
-        }    
+                tsfcst_summ = ts( fcst_summ, start = c( year(fcst_sum_beg), quarter(fcst_sum_beg) ), frequency = 4 )
+                colnames( tsfcst_summ )
+                ### insert in PSQL
+                ### upload to SQL 
+                sql_query <- sprintf("INSERT INTO ncstlvpseudo.resu3888 (created, xim, model, fcstorig, stochvol, lambdaset ) VALUES ('%s','%s','%s','%s','%s','%s')", 
+                                     opt$created, xim2psql, model_choice, fcst_orgn, SV_switch, lambdaset );    sql_query
+                dbGetQuery(conn, sql_query)                      
+                
+                ### put columns of tsdbx into PSQL
+                sapply( colnames( tsfcst_summ ), function( sx){ # sx = colnames( tsfcst_summ )[ 1 ]; sx
+                  
+                  sql_query <- sprintf("UPDATE ncstlvpseudo.resu SET %s = '%s' WHERE created = '%s' AND model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s'", 
+                                       sx, ts2hstore( tsfcst_summ[, sx ] ), opt$created, model_choice, fcst_orgn, SV_switch, lambdaset );sql_query
+                  dbGetQuery(conn, sql_query)  
+                  
+                })
+                
+                ### summmarize fcst accuracy -> insert into PSQL
+                sapply(opt$metric, function(i_metric){ # i_metric = opt$metric[2]; i_metric
+                  
+                  pool_subsamples = lapply( opt$fcst_eval_smpl, function( smpl ){ # smpl = opt$fcst_eval_smpl[[4]]; smpl
+                    
+                    if( i_metric == "rmsfe" ) ud = window( tsfcst_summ[, "erro_median"], start = smpl$beg, end = smpl$end )**2 %>% mean %>% sqrt
+                    if( i_metric == "mcrps" ) ud = window( tsfcst_summ[, "crps"       ], start = smpl$beg, end = smpl$end )    %>% mean 
+                    if( i_metric == "mlogs" ) ud = window( tsfcst_summ[, "logs"       ], start = smpl$beg, end = smpl$end )    %>% mean
+                    ud
+                    
+                  })
+                  pool_metric = do.call( "cbind.data.frame", pool_subsamples ); pool_metric
+                  
+                  ### insert into PSQL
+                  # hstore2sql = paste( colnames( pool_metric ), pool_metric, sep="=>", collapse=",")
+                  # sql_query <- sprintf("UPDATE ncstlvpseudo.resu SET %s = '%s' WHERE created = '%s' AND model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s'", 
+                  #                      i_metric, hstore2sql, opt$created, model_choice, fcst_orgn,SV_switch,lambdaset );sql_query
+                  
+                  ### insert into PSQL
+                  sapply( names(pool_metric), function(sample){ # sample = names(pool_metric)[1]; sample
+                    
+                    metric_value = pool_metric[[ sample ]]; metric_value
+                    
+                    sql_query <- sprintf("UPDATE ncstlvpseudo.resu SET %s_%s = %s WHERE created = '%s' AND model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s'", 
+                                         i_metric,sample, metric_value, opt$created, model_choice, fcst_orgn,SV_switch,lambdaset );sql_query
+                    dbGetQuery(conn, sql_query) 
+                    
+                  })
+                  
+                
+                #head( tsfcst_summ )
+                
+                fcst_title =      paste0( xim2psql,"_",model_choice,"_"  ,lambdaset,"_",SV_switch,"_", fcst_orgn ); fcst_title
+                fcst_title4plot = paste0( xim2psql,"_",model_choice,"_\n",lambdaset,"_",SV_switch,"_", fcst_orgn ); fcst_title4plot
+                
+                tsWrite( tsfcst_summ, paste0( path$resu, "fcst_summ_", fcst_title,".csv" ) )
+                
+                pdf( paste0( path$plot, "fcst_otrn_", fcst_title,".pdf"), width = 12, height = 7 )
+                tfplot( ts(0, start = start( tsfcst_summ), end = end(tsfcst_summ), frequency = frequency( tsfcst_summ ) ), 
+                        title = fcst_title4plot, ylab = "", ylim = range( tsfcst_summ[ ,c( "otrn", "q0p165", "q0p835" ) ] ), col = "gray" )
+                lines( tsfcst_summ[ ,"otrn"], lwd = 2, type = "b" )
+                lines( tsfcst_summ[ ,"median"], col = "red", lwd = 2, type = "b" )
+                lines( tsfcst_summ[ ,"q0p165"], col = "blue", lwd = 2 )
+                lines( tsfcst_summ[ ,"q0p835"], col = "blue", lwd = 2 )
+                dev.off()
+                
+                
+                # tfplot( tsfcst_summ[ ,"crps"], lwd = 2, title = fcst_title, ylab = "crps" )
+                # tfplot( tsfcst_summ[ ,"logs"], lwd = 2, title = fcst_title, ylab = "logs" )
+                
+          }) 
+        }
       }
     }   
   }
   
   
-} 
+  } 
 
 
-list_resu_alle = list.files( path$resu )
+# dbDisconnect( conn )
 
 
-### insert into PSQL
-drv <- dbDriver("PostgreSQL")
-conn <- dbConnect(drv, dbname="postgres", host="localhost", user="postgres", password="postgres", port="5432")
 
-#dbGetQuery(conn, "SET search_path to sboriss")
-#dbGetQuery(conn, "CREATE EXTENSION IF NOT EXISTS hstore;") 
 
-if( FALSE ){ 
-  
-    # dbGetQuery(conn, "DELETE FROM ncstlvpseudo.resu;") 
-    
-    query_sql = "CREATE TABLE ncstlvpseudo.resu ( created date not null, model varchar(256) not null, fcstorig char(3) not null, stochvol varchar(6) not null, lambdaset char(7) not null, PRIMARY KEY(created, model, fcstorig, stochvol, lambdaset ) );"
-    dbGetQuery(conn, query_sql ) 
-    
-    colname2psql_hstore = c( colnames( tsdbx ) ); colname2psql_hstore
-    
-    for( i in seq_along(colname2psql_hstore) ){ # i = 1
-    
-      query_sql = sprintf( "ALTER TABLE ncstlvpseudo.resu ADD COLUMN %s hstore", colname2psql_hstore[ i ]);
-      dbGetQuery(conn, query_sql ) 
-    
-    }
-    
-    colname2psql_metric = paste( rep( opt$metric, each = 4), rep( names( opt$fcst_eval_smpl), 3) , sep="_" ); colname2psql_metric
-    
-    for( i in seq_along(colname2psql_metric) ){ # i = 1
-      
-      query_sql = sprintf( "ALTER TABLE ncstlvpseudo.resu ADD COLUMN %s double precision", colname2psql_metric[ i ]);
-      dbGetQuery(conn, query_sql ) 
-      
-    }
-    
-}
 
-### insert fcst summary of each model into PSQL
-if( FALSE ){ 
-  sapply(list_resu_alle, function(file_name){ # file_name = list_resu_alle[151]; file_name
-  
-  dbx = read.csv( paste0( path$resu, file_name ), stringsAsFactors = F ); head( dbx )
-  tsdbx = ts( dbx, start = c( dbx$year[1], dbx$period[1] ), frequency = 4 )[, -c(1,2)]
-  
-  file_name_aux = gsub( "as_in_CCM2015", "ccm2015", file_name     ); file_name_aux
-  
-  
-  fcst_orgn = str_extract( file_name_aux,  "fo[0-9]{1}"    ); fcst_orgn
-  SV_switch = str_extract( file_name_aux,  "SV-[A-Z]{2,3}" ); SV_switch
-  lambdaset = ifelse( grepl( "diffuse", file_name_aux ), "diffuse", "ccm2015" ); lambdaset
-  
-  ### remove all attributes to get model specification
-  file_name_aux = gsub( "fcst_summ_"           , "", file_name_aux ); file_name_aux
-  file_name_aux = gsub( "\\.csv"               , "", file_name_aux ); file_name_aux
-  file_name_aux = gsub( paste0( "_",fcst_orgn ), "", file_name_aux ); file_name_aux
-  file_name_aux = gsub( paste0( "_",SV_switch ), "", file_name_aux ); file_name_aux
-  model_choice  = gsub( paste0( "_",lambdaset ), "", file_name_aux ); model_choice
-  
-  
-  ### upload to SQL 
-  sql_query <- sprintf("INSERT INTO ncstlvpseudo.resu (created, model, fcstorig, stochvol, lambdaset ) VALUES ('%s','%s','%s','%s','%s')", 
-                       opt$created, model_choice, fcst_orgn, SV_switch, lambdaset );    sql_query
-  dbGetQuery(conn, sql_query)                      
-  
-  colnames( tsdbx )
-  colnames( tsdbx ) = gsub( "erro.Q50.","erro_q50pp", colnames( tsdbx ), fixed = T )
-  colnames( tsdbx ) = gsub( "\\.$","pp", colnames( tsdbx )  ); colnames( tsdbx )
-  colnames( tsdbx ) = tolower( gsub( "\\.","p", colnames( tsdbx ) ) )
-  colnames( tsdbx )
-  
-  ### put columns of tsdbx into PSQL
-  sapply( colnames( tsdbx ), function( sx){ # sx = colnames( tsdbx )[ 2 ]; sx
-    
-    sql_query <- sprintf("UPDATE ncstlvpseudo.resu SET %s = '%s' WHERE created = '%s' AND model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s'", 
-                         sx, ts2hstore( tsdbx[, sx ] ), opt$created, model_choice, fcst_orgn, SV_switch, lambdaset );sql_query
-    dbGetQuery(conn, sql_query)  
-    
-  })
-  
-  ### summmarize fcst accuracy -> insert into PSQL
-  sapply(opt$metric, function(i_metric){ # i_metric = opt$metric[1]; i_metric
-    
-    pool_subsamples = lapply( opt$fcst_eval_smpl, function( smpl ){ # smpl = opt$fcst_eval_smpl[[4]]; smpl
-      
-      if( i_metric == "rmsfe" ) ud = window( tsdbx[, "erro_q50pp"], start = smpl$beg, end = smpl$end )**2 %>% mean %>% sqrt
-      if( i_metric == "mcrps" ) ud = window( tsdbx[, "crps"      ], start = smpl$beg, end = smpl$end )    %>% mean 
-      if( i_metric == "mlogs" ) ud = window( tsdbx[, "logs"      ], start = smpl$beg, end = smpl$end )    %>% mean
-      ud
-      
-    })
-    pool_metric = do.call( "cbind.data.frame", pool_subsamples ); pool_metric
-    
-    ### insert into PSQL
-    # hstore2sql = paste( colnames( pool_metric ), pool_metric, sep="=>", collapse=",")
-    # sql_query <- sprintf("UPDATE ncstlvpseudo.resu SET %s = '%s' WHERE created = '%s' AND model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s'", 
-    #                      i_metric, hstore2sql, opt$created, model_choice, fcst_orgn,SV_switch,lambdaset );sql_query
-    
-    ### insert into PSQL
-    sapply( names(pool_metric), function(sample){ # sample = names(pool_metric)[1]; sample
-      
-        metric_value = pool_metric[[ sample ]]; metric_value
-        
-        sql_query <- sprintf("UPDATE ncstlvpseudo.resu SET %s_%s = %s WHERE created = '%s' AND model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s'", 
-                             i_metric,sample, metric_value, opt$created, model_choice, fcst_orgn,SV_switch,lambdaset );sql_query
-        dbGetQuery(conn, sql_query) 
-        
-    })
-    
-  })
 
-})
-}
 
-#sql_query = sprintf(  "SELECT model, fcstorig FROM ncstlvpseudo.resu WHERE model = '%s' AND fcstorig = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, fcstorig, stochvol, lambdaset ); sql_query
 
-getMetricFromPSQL = function( model, stochvol, lambdaset, metric, sample ){
-  
-  sql_query = sprintf(  "SELECT fcstorig, %s -> '%s' AS %s_%s FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", metric, sample, metric, sample, model, stochvol, lambdaset ); sql_query
-  dbGetQuery(conn, sql_query )  
 
-}
-getMetricFromPSQLbyFO = function( stochvol, lambdaset, fcstorig, metric_sample ){
-  
-  sql_query = sprintf(  "SELECT model, fcstorig, %s FROM ncstlvpseudo.resu WHERE stochvol = '%s' AND lambdaset = '%s' AND fcstorig = '%s';", 
-                        metric_sample, stochvol, lambdaset, fcstorig ); sql_query
-  dbGetQuery(conn, sql_query )  
-  
-}
-getMetricFromPSQLbyFOcond = function( stochvol, lambdaset, fcstorig, metric_sample, condition ){
-  
-  sql_query = sprintf(  "SELECT model, fcstorig, %s FROM ncstlvpseudo.resu WHERE stochvol = '%s' AND lambdaset = '%s' AND fcstorig = '%s' %s;", 
-                        metric_sample, stochvol, lambdaset, fcstorig, condition ); sql_query
-  dbGetQuery(conn, sql_query )  
-  
-}
-getMetricForSingleModelFromPSQLbyFO = function( model, stochvol, lambdaset, fcstorig, metric_sample ){
-  
-  sql_query = sprintf(  "SELECT model, fcstorig, %s FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' AND fcstorig = '%s';", 
-                        metric_sample, model, stochvol, lambdaset, fcstorig ); sql_query
-  dbGetQuery(conn, sql_query )  
-  
-}
 
-getMetricForSingleModelFromPSQL = function( model, stochvol, lambdaset, metric_sample ){
-  
-  sql_query = sprintf(  "SELECT model, fcstorig, %s FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s';", 
-                        metric_sample, model, stochvol, lambdaset ); sql_query
-  dbGetQuery(conn, sql_query )  
-  
-}
 
-model     = "AR0+incpt" #"AR2+incpt+vacancy_yoy+omxr_qoq+survreta_lvl+retail_yoy+survind_lvl+survind_biud" # ,"AR2+incpt+irate3m_qoq"	
 
-###############################
-### point forecasts ###########
-###############################
 
-#compare AR0 with AR2: rmsfe
-choice_metrix = paste( "rmsfe", names( opt$fcst_eval_smpl ), sep = "_" )
-pool_pair_metrix = lapply( choice_metrix, function( name2get ){ # name2get = choice_metrix[1]
-    
-    joint = list( lambdaset = "diffuse", stochvol  = "SV-OFF", name2get = name2get ) 
-    malte = list( model = "AR2+incpt")
-    mbcnh = list( model = "AR0+incpt" )
-    
-    malte_metrx = getMetricForSingleModelFromPSQL( malte$model, joint$stochvol, joint$lambdaset, joint$name2get )
-    mbnch_metrx = getMetricForSingleModelFromPSQL( mbcnh$model, joint$stochvol, joint$lambdaset, joint$name2get )
-    
-    metrix = rbind( name2get, round( mbnch_metrx[[ joint$name2get ]], digits = 3), 
-                              round( malte_metrx[[ joint$name2get ]], digits = 3)  )
-    rownames( metrix ) = c( "name2get", mbcnh$model, malte$model )
-    colnames( metrix ) = mbnch_metrx$fcstorig; metrix
-
-})
-names( pool_pair_metrix ) = choice_metrix; pool_pair_metrix
-do.call( "rbind", pool_pair_metrix )
-
-### select models that are more accurate than benchmark
-fcstorig      = "fo1"	
-stochvol      = "SV-OFF"	
-lambdaset     = "diffuse" # "ccm2015" # 
-metric_sample = "rmsfe_crisis"  #  "rmsfe_postcrisis"  # 
-
-bnch = getMetricForSingleModelFromPSQLbyFO( "AR2+incpt", "SV-OFF", "diffuse", fcstorig, metric_sample )
-bnch_condition = paste( "AND",names( bnch )[3],"<", bnch[[3]] ); 
-bnch; bnch_condition 
-
-accu_condition = getMetricFromPSQLbyFOcond( stochvol, lambdaset, fcstorig, metric_sample, bnch_condition )
-
-if( sum( dim( accu_condition ) ) > 0 ){ 
-
-  ratio2bnch = accu_condition[[ metric_sample ]] / bnch[[ metric_sample ]]
-  cbind( accu_condition, ratio2bnch, bnch[ , metric_sample]  )
-
-}else{
-  
-  cat( "NB! NO MODELS THAT BEAT THIS BENCHMARK CONDITION: ", bnch_condition)
-}
-###############################
-### density forecasts #########
-###############################
-
-fcstorig      = "fo1"	
-stochvol      = "SV-ON"	
-lambdaset     = "diffuse"
-metric_sample = "mcrps_postcrisis"
-
-bnch = getMetricForSingleModelFromPSQLbyFO( "AR2+incpt", "SV-ON", "diffuse", fcstorig, metric_sample )
-bnch_condition = paste( "AND",names( bnch )[3],"<", bnch[[3]] ); 
-bnch; bnch_condition 
-
-accu_condition = getMetricFromPSQLbyFOcond( stochvol, lambdaset, fcstorig, metric_sample, bnch_condition )
-
-ratio2bnch = accu_condition[[ metric_sample ]] / bnch[[ metric_sample ]]
-
-cbind( accu_condition, ratio2bnch, bnch[ , metric_sample]  )
-
-######################################################################################
-
-
-getTS2HSTORE = function( model, stochvol, lambdaset, fcstorig, name2get ){ 
-  
-  sql_query = sprintf(  "SELECT public.skeys( %s ), public.svals( %s ) FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' AND fcstorig = '%s';", name2get, name2get, model, stochvol, lambdaset, fcstorig ); sql_query
-  df = dbGetQuery(conn, sql_query ) 
-  dateBeg = as.Date( df$skeys[1] ); dateBeg
-  tsx = ts( as.numeric( df$svals ), start = c( year(dateBeg), quarter( dateBeg ) ), frequency = 4 )
-  #tfplot( tsx )
-  tsx
-}
-
-#############################################################
-### POINT FORECASTS #########################################
-#############################################################
-
-joint = list( fcstorig  = "fo4", lambdaset = "diffuse", stochvol  = "SV-ON", name2get = "erro_q50pp" ) 
-malte = list( model = "AR2+incpt+vacancy_yoy+omxr_qoq+retail_yoy")
-mbcnh = list( model = "AR2+incpt" )
-             
-tsx       = getTS2HSTORE( malte$model, joint$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
-tsx_mbnch = getTS2HSTORE( mbcnh$model, joint$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
-
-tsx_fcst     = getTS2HSTORE( model, stochvol, lambdaset, fcstorig, "q50pp" )
-tsx_fcst_low = getTS2HSTORE( model, stochvol, lambdaset, fcstorig, "q16p5pp" )
-tsx_fcst_upp = getTS2HSTORE( model, stochvol, lambdaset, fcstorig, "q83p5pp" )
-tsx_otrn     = getTS2HSTORE( model, stochvol, lambdaset, fcstorig, "otrn" )
-
-tfplot( tsx_otrn ); 
-lines( tsx_fcst, col = "red");lines( tsx_fcst_low, col = "blue"); lines( tsx_fcst_upp, col = "blue")
-
-### effect of stochvol on point fcst accuracy
-
-joint = list( fcstorig  = "fo4", lambdaset = "diffuse", name2get = "erro_q50pp" ) 
-malte = list( model = "AR2+incpt", stochvol  = "SV-ON")
-mbcnh = list( model = "AR2+incpt", stochvol  = "SV-OFF" )
-
-tsx       = getTS2HSTORE( malte$model, malte$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
-tsx_mbnch = getTS2HSTORE( mbcnh$model, mbcnh$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
-
-
-cssfed = ts( cumsum( tsx_mbnch**2 - tsx**2 ), start = start( tsx_mbnch ), frequency = frequency( tsx_mbnch ) )
-
-tfplot( cssfed )
-
-tsx_otrn_malte = getTS2HSTORE( malte$model, malte$stochvol, joint$lambdaset, joint$fcstorig, "q50pp" )
-tsx_otrn_mbnch = getTS2HSTORE( mbcnh$model, mbcnh$stochvol, joint$lambdaset, joint$fcstorig, "q50pp" )
-
-tfplot( tsx_otrn_malte ); 
-lines( tsx_otrn_mbnch, col = "red")
-
-#############################################################
-### DENSITY FORECASTS #######################################
-#############################################################
-
-joint = list( fcstorig  = "fo4", lambdaset = "diffuse", name2get = "logs" ) 
-malte = list( model = "AR2+incpt+vacancy_yoy", stochvol  = "SV-ON")
-mbcnh = list( model = "AR2+incpt"            , stochvol  = "SV-OFF" )
-
-
-tsx       = getTS2HSTORE( malte$model, malte$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
-tsx_mbnch = getTS2HSTORE( mbcnh$model, malte$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
-
-cumsumdif = ts( cumsum( tsx_mbnch - tsx ), start = start( tsx_mbnch ), frequency = frequency( tsx_mbnch ) )
-
-tfplot( cumsumdif, ylab = paste( "cumsumdif", joint$name2get) )
-
-
-
-#########################################
-joint = list( fcstorig  = "fo4", lambdaset = "diffuse", name2get = "crps" ) 
-malte = list( model = "AR0+incpt", stochvol  = "SV-ON")
-mbcnh = list( model = "AR0+incpt", stochvol  = "SV-OFF" )
-
-
-tsx       = getTS2HSTORE( malte$model, malte$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
-tsx_mbnch = getTS2HSTORE( mbcnh$model, mbcnh$stochvol, joint$lambdaset, joint$fcstorig, joint$name2get )
-
-cumsumdif = ts( cumsum( tsx_mbnch - tsx ), start = start( tsx_mbnch ), frequency = frequency( tsx_mbnch ) )
-
-tfplot( cumsumdif, ylab = paste( "cumsumdif", joint$name2get) )
-
-
-
-
-
-
-
-
-
-
-sample_list = c( "fullsample", "pre_crisis", "crisis", "post_crisis" )
-
-sql_query = sprintf( "SELECT DISTINCT model FROM ncstlvpseudo.resu;" ); sql_query
-model_list = dbGetQuery(conn, sql_query )
-model_list$model
-
-###loop over sample
-ud = lapply( sample_list, function( sample ) getMetricFromPSQL( model, stochvol, lambdaset, metric, sample ) ) 
-names( ud ) = sample_list
-ud
-
-### get those models that are better than benchmark for fo1 
-model_metric_fo1 = lapply( model_list$model, function( model ){ 
-  
-    ud = lapply( sample_list, function( sample ) getMetricFromPSQLbyFO( model, stochvol, lambdaset, metric, sample, "fo1" ) ) 
-    names( ud ) = sample_list
-    ud
-
-}); names( model_metric_fo1 ) = model_list$model
-model_metric_fo1
-
-
-
-# ### collect rmsfe in fullsample
-# sql_query = sprintf(  "SELECT fcstorig, rmsfe -> 'fullsample' AS rmsfe_fullsample FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, stochvol, lambdaset ); sql_query
-# dbGetQuery(conn, sql_query )
-# 
-# sql_query = sprintf(  "SELECT fcstorig, rmsfe -> 'pre_crisis' AS rmsfe_pre_crisis FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, stochvol, lambdaset ); sql_query
-# dbGetQuery(conn, sql_query )
-# 
-# sql_query = sprintf(  "SELECT fcstorig, rmsfe -> 'crisis' AS rmsfe_crisis FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, stochvol, lambdaset ); sql_query
-# dbGetQuery(conn, sql_query )
-# 
-# sql_query = sprintf(  "SELECT fcstorig, rmsfe -> 'post_crisis' AS rmsfe_post_crisis FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, stochvol, lambdaset ); sql_query
-# dbGetQuery(conn, sql_query )
-# 
-# 
-# sql_query = sprintf(  "SELECT model, fcstorig FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", "AR2+incpt", "SV-ON", "diffuse" ); sql_query
-# dbGetQuery(conn, sql_query ) 
-# 
-# model = "AR2+incpt+vacancy_yoy+omxr_qoq+survreta_lvl+retail_yoy+survind_lvl+survind_biud"
-# 
-# sql_query = sprintf(  "SELECT fcstorig, stochvol, lambdaset, public.skeys(rmsfe), public.svals(rmsfe), model  FROM ncstlvpseudo.resu WHERE model = '%s' AND stochvol = '%s' AND lambdaset = '%s' ;", model, "SV-ON", "diffuse" ); sql_query
-# dbGetQuery(conn, sql_query ) 
-
-
-
-# close the connection
-dbDisconnect(conn)
-dbUnloadDriver(drv)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-list_resu_db_alle = lapply( list_resu_alle, function( resu_file ){
-  
-  resu_mat = read.csv( paste0( path$resu, resu_file), stringsAsFactors = F ); head( resu_mat )
-  ts_resu = ts( resu_mat, start = c( resu_mat$year[1], resu_mat$period[1] ), frequency = 4 )
-  
-})
-names( list_resu_db_alle ) = list_resu_alle
-
-choiceFO = "_fo4"
-choiceSV = "_SV-OFF" #"_SV-ON" # 
-choicePR = "_diffuse" # "_as_in_CCM2015" #
-
-list_resu_db_fo       = list_resu_db_alle [ grep( choiceFO, names(list_resu_db_alle) ) ]
-list_resu_db_fo_sv    = list_resu_db_fo   [ grep( choiceSV, names(list_resu_db_fo) ) ]
-list_resu_db_fo_sv_pr = list_resu_db_fo_sv[ grep( choicePR, names(list_resu_db_fo_sv) ) ]
-
-names( list_resu_db_fo_sv_pr )
-
-fcst_eval_smpl = list( fullsample  = list( beg = c(2004,1), end = c(2017,4) ),
-                       pre_crisis  = list( beg = c(2004,1), end = c(2007,3) ),
-                       crisis      = list( beg = c(2007,4), end = c(2010,3) ),
-                       post_crisis = list( beg = c(2010,4), end = c(2017,4) ) )
-
-metric = c( "rmsfe", "mlogs", "mcrps" )
-
-### loop over metrics
-lapply(metric, function(i_metric){ # i_metric = metric[1]; i_metric
-  
-  ### loop over models
-  pool_models = lapply( list_resu_db_fo_sv_pr, function( ts_resu){ 
-    
-    ### loop over sub-samples
-    pool_subsamples = lapply( fcst_eval_smpl, function( smpl ){ #smpl = fcst_eval_smpl[[3]]
-      
-      if( i_metric == "rmsfe" ) ud = window( ts_resu[, "erro.Q50."], start = smpl$beg, end = smpl$end )**2 %>% mean %>% sqrt
-      if( i_metric == "mcrps" ) ud = window( ts_resu[, "crps"     ], start = smpl$beg, end = smpl$end )    %>% mean 
-      if( i_metric == "mlogs" ) ud = window( ts_resu[, "logs"     ], start = smpl$beg, end = smpl$end )    %>% mean
-      ud
-      
-    })
-    do.call( "cbind", pool_subsamples )
-    
-  })
-  names( pool_models ) = gsub( "fcst_summ_", "", names( pool_models ) )
-  names( pool_models ) = gsub( ".csv"      , "", names( pool_models ), fixed = T )
-  pool_models_tbl = do.call( "rbind", pool_models )
-  rownames( pool_models_tbl ) = names( pool_models ); pool_models_tbl
-  
-  apply( pool_models_tbl, 1, function( x ) x / pool_models_tbl[ 1, , drop = F] )
-  
-  pool_models_tbl_ud = cbind( pool_models_tbl, sweep( pool_models_tbl, 2, c( pool_models_tbl[ 1, ] ) , `/` ) )
-  
-  write.csv( pool_models_tbl_ud, paste0( path$summ, "resu_summ_subsample_", i_metric,choicePR,choiceSV,choiceFO,".csv" ) )
-  
-})
-
-
-### Q1: does SV improve RMSFE
-if( FALSE ){
-  
-  list_resu_summ_alle = list.files( path$summ ) 
-  
-  list_resu_summ_rmsfe_diffuse = list_resu_summ_alle[ grep( "_rmsfe_diffuse_", list_resu_summ_alle ) ]; list_resu_summ_rmsfe_diffuse
-  
-  
-  col2compare = c( "fullsample", "pre_crisis", "crisis", "post_crisis" )
-  list_resu_summ_rmsfe_diffuse_tbl = lapply( list_resu_summ_rmsfe_diffuse, function(sx){
-    # sx = list_resu_summ_rmsfe_diffuse[1]
-    dbx = read.csv( paste0( path$summ, sx ), stringsAsFactors = F, row.names = 1 )[, col2compare ]  
-    
-  })
-  names( list_resu_summ_rmsfe_diffuse_tbl ) = list_resu_summ_rmsfe_diffuse
-  
-  rmsfe_onn_model = list_resu_summ_rmsfe_diffuse_tbl[[ "resu_summ_subsample_rmsfe_diffuse_SV-ON_fo4.csv"  ]][-c(1,2), ]
-  rmsfe_off_model = list_resu_summ_rmsfe_diffuse_tbl[[ "resu_summ_subsample_rmsfe_diffuse_SV-OFF_fo4.csv" ]][-c(1,2), ]
-  
-  rownames( rmsfe_onn_model ) = gsub( "_SV-ON_fo4", "", rownames( rmsfe_onn_model ) )
-  rownames( rmsfe_off_model ) = gsub( "_SV-OFF_fo4","", rownames( rmsfe_off_model ) )
-  
-  ratio_resu_summ_rmsfe_diffuse_tbl = ( rmsfe_onn_model / rmsfe_off_model - 1 ) * 100
-  
-  ### for all models
-  apply( ratio_resu_summ_rmsfe_diffuse_tbl, 2, median )
-  summary( ratio_resu_summ_rmsfe_diffuse_tbl )
-  
-  ### for all models| better than AR2+incpt SV-OFF (either SV-ON or SV-OFF )
-  bnch = list_resu_summ_rmsfe_diffuse_tbl[[ "resu_summ_subsample_rmsfe_diffuse_SV-OFF_fo4.csv" ]][ "AR2+incpt_diffuse_SV-OFF_fo4", , drop = F]; bnch
-  
-  ### ratio wrt bnch
-  rmsfe_off_model2bnch = sweep( rmsfe_off_model, 2, unlist( c( bnch ) ), `/`)
-  rmsfe_onn_model2bnch = sweep( rmsfe_onn_model, 2, unlist( c( bnch ) ), `/`) 
-  
-  rmsfe_onn_model2bnch_log = rmsfe_onn_model2bnch < 1
-  rmsfe_off_model2bnch_log = rmsfe_off_model2bnch < 1 
-  
-  indx_log = ifelse( rmsfe_onn_model2bnch_log + rmsfe_off_model2bnch_log > 0, 1, NA )
-  
-  indx_by_subsample = apply( indx_log, 2, function(x) c( which( !is.na( x ) ) ) )
-  
-  sapply( names( indx_by_subsample ), function( x ){
-    
-    indx = indx_by_subsample[[ x ]]; attributes( indx ) = NULL
-    summary( ratio_resu_summ_rmsfe_diffuse_tbl[indx, x ] )
-    
-  })
-  
-}
-
-fnGetDateSQL <- function(x){
-  ### create dates in SQL(hstore) format  
-  # input: a ts object x
-  period <- "month"
-  beg.x  <- start(x)
-  if(frequency(x) == 4){ period <- "3 months"; beg.x[2] <- beg.x[2]*3;} #set to the last month in quarter
-  return(seq(as.Date(sprintf("%i-%i-1", beg.x[1], beg.x[2])), by=period, length.out=length(x)))
-}
-fnGetHstore <- function(x){
-  ### create hstore object for SQL  
-  # input: a ts object x
-  dates  <- fnGetDateSQL(x); dates
-  hstore <- paste(dates, x, sep="=>", collapse=",")
-  hstore <- gsub("NA","NULL",hstore); 
-  return(hstore)
-}
-
-
-drv <- dbDriver("PostgreSQL")
-
-conn <- dbConnect(drv, dbname="sboriss", host="localhost", user="postgres", password="postgres", port="5432")
-
-dbGetQuery(conn, "SET search_path to sboriss")
-dbGetQuery(conn, "CREATE EXTENSION IF NOT EXISTS hstore;")
-
-dbGetQuery(conn, "CREATE EXTENSION hstore SCHEMA public;")
-
-ts2hstore = function( x ){
-  
-  dates    <- fnGetDateSQL(x); dates
-  x_hstore <- paste(dates, x, sep="=>", collapse=","); x_hstore
-  x_hstore <- gsub("NA","NULL",x_hstore)  
-  x_hstore
-}
-
-ts2hstore( ts( rnorm(5), start = 1 ) )
-
-### upload to SQL 
-sql_query <- sprintf("INSERT INTO public.books (title, attr) VALUES ('MY DATA','%s')", ts2hstore( ts( rnorm(5), start = 1 ) ) ); sql_query
-df = dbGetQuery(conn, sql_query)
-
-str( df )
-rownames( df )
-
-df[ 1, ]
-
-### get all values
-sql_query <- "SELECT public.skeys(attr), public.svals(attr) FROM public.books WHERE id = 1;"
-df = dbGetQuery(conn, sql_query)
-
-rownames( df ) = df$skeys
-df[,-1, drop = F] 
-
-df[ "weight", ]
-
-attributes( df )
-
-sql_query <- "SELECT public.svals(attr) FROM public.books WHERE id = 1;"
-df = dbGetQuery(conn, sql_query)
-
-
-sql_query <- "SELECT attr -> 'weight' AS weight FROM public.books WHERE  id = 1;"
-dbGetQuery(conn, sql_query)
-
-
-
-
-sql_query <- "SELECT title, (EACH(attr) ).* FROM public.books;"
-dbGetQuery(conn, sql_query)
-
-
-#   query_i <- sprintf("SELECT public.skeys(data)::date AS date, public.svals(data)::double precision AS value
-#                          FROM %s
-#                  WHERE abbr='%s' AND vintage='%s' AND release='%s' ",
-#                    sql$data_qsna, x["abbr"], x["vintage"], x["release"]); query_i
-#   dfy <- dbGetQuery(conn, query_i)
-#
-
-
-
-
-list_pair_csv = c( "fcst_summ_AR2+incpt_diffuse_SV-ON.csv",
-                   "fcst_summ_AR2+incpt+vacancy_yoy+omxr_qoq_diffuse_SV-ON.csv" )
-
-list_pair_csv = c( "fcst_summ_AR0+incpt_diffuse_SV-OFF.csv",
-                   "fcst_summ_AR2+incpt_diffuse_SV-ON.csv" )
-
-list_pair_csv = c( "fcst_summ_AR0+incpt_diffuse_SV-ON.csv",
-                   "fcst_summ_AR2+incpt_diffuse_SV-ON.csv" )
-
-list_pair_csv = c( "fcst_summ_AR2+incpt_diffuse_SV-OFF.csv",
-                   "fcst_summ_AR2+incpt_diffuse_SV-ON.csv" )
-
-list_pair_csv = c( "fcst_summ_AR2+incpt_diffuse_SV-ON.csv",
-                   "fcst_summ_AR2+incpt+vacancy_yoy+omxr_qoq_diffuse_SV-ON.csv" )
-
-list_pair_csv = c( "fcst_summ_AR2+incpt_diffuse_SV-ON.csv",
-                   "fcst_summ_AR2+incpt+expt_qoq_diffuse_SV-ON.csv" )
-
-list_pair_csv = c( "fcst_summ_AR2+incpt_diffuse_SV-ON.csv",
-                   "fcst_summ_AR2+incpt+expt_yoy_diffuse_SV-ON.csv" )
-list_pair_model = sapply( list_pair_csv, function(x){  
-  
-  tmp = gsub( "fcst_summ_","", x)
-  gsub( ".csv","", tmp, fixed = T )
-  
-})
-attributes( list_pair_model ) <- NULL; list_pair_model
-
-title4plot = paste( unlist( list_pair_model ), collapse = "\n" )
-
-fGetFcstSumm = function( list_file, sx ){
-  ud = lapply( list_file, function( sfile ){
-    
-    db = as.data.frame( read.csv( sfile ) ); print( colnames( db )  )
-    ts( db[, sx ], start = c( db$year[1], quarter = db$period[1] ), frequency = 4 )
-    
-  })
-  ud
-}
-erro = fGetFcstSumm( paste0( path$resu, list_pair_csv ), "erro.Q50." )
-names( erro ) = list_pair_model; erro
-
-erro2Sqr = ( do.call( "cbind", erro ) )**2
-mat_cssfed = apply( sweep( erro2Sqr, 1, c( erro2Sqr[,1] ) , `-` ) * (-1), 2, cumsum )[ ,-1]
-ts_cssfed  = ts( mat_cssfed, start = start( erro2Sqr ), frequency = frequency( erro2Sqr ) )
-tfplot( ts_cssfed, title = paste("CSSFED: \n", title4plot ) )
-
-fcst = fGetFcstSumm( paste0( path$resu, list_pair_csv ), "Q50." )
-names( fcst ) = list_pair_model; fcst
-
-tsy_fcst_sample = window( tsy, start = start( fcst[[1]] ), end = end( fcst[[1]] ) )
-tfplot( tsy_fcst_sample, lwd = 2, title = paste("OUTTURN: \n", title4plot )  ); abline( h = 0 )
-lines( fcst[[1]], type = "b", col = "blue")
-lines( fcst[[2]], type = "b", col = "red")
-
-logs = fGetFcstSumm( paste0( path$resu, list_pair_csv ), "logs" )
-names( logs ) = list_pair_model; logs
-mat_logs = ( do.call( "cbind", logs ) )
-mat_cslogs = apply( sweep( mat_logs, 1, c( mat_logs[,1] ) , `-` ) * (-1), 2, cumsum )[ ,-1]
-ts_cslogs  = ts( mat_cslogs, start = start( mat_logs ), frequency = frequency( mat_logs ) )
-tfplot( ts_cslogs, title = paste("CSLOGS: \n", title4plot ) )
-
-crps = fGetFcstSumm( paste0( path$resu, list_pair_csv ), "crps" )
-names( crps ) = list_pair_model; crps
-mat_crps = ( do.call( "cbind", crps ) )
-mat_cscrps = apply( sweep( mat_crps, 1, c( mat_crps[,1] ) , `-` ) * (-1), 2, cumsum )[ ,-1]
-ts_cscrps  = ts( mat_cscrps, start = start( mat_crps ), frequency = frequency( mat_crps ) )
-tfplot( ts_cscrps, title = paste("CSCRPS: \n", title4plot ) )
-
-
-###################################################
-list_info_tsx
-
-SIM = sapply( list_info_tsx, "[[", 2 ); attributes( SIM ) = NULL; str( SIM )
-
-### drop 'incpt' from SIM
-SIM = SIM[ -which( SIM == "incpt" )]; SIM
-
-unique_x = unique( sapply( SIM, function(x) strsplit( x, "_" ) %>% unlist %>% `[[`(1) ) ); unique_x
-
-### create all combinations of two indicators
-DIM0 = combn(SIM, 2); length( DIM0 )
-
-### remove pairs with the same x
-sx = unique_x[1]; sx
-
-dim( DIM0 )
-
-### loop over sx
-indx_doubles = sapply( unique_x, function(sx){
-
-  which( apply( DIM0, 2, function( pair_sx ) all( grepl( sx, pair_sx ) ) ) )
-
-})
-
-DIM = DIM0[, -( indx_doubles %>% unlist )  ]; DIM[, 1]
-
-### create all combinations of three indicators
-TIM00 = combn(SIM, 3); length( TIM00 ); TIM00[,1]; TIM00[,9846]
-
-### remove triples with the same x
-
-### loop over sx
-indx_triples = sapply( unique_x, function(sx){
-  
-  which( apply( TIM00, 2, function( triple_sx ) all( grepl( sx, triple_sx ) ) ) )
-  
-})
-
-TIM0 = TIM00[, -( indx_triples %>% unlist )  ]; TIM0[, 1]
-
-### remove doubles with the same x
-
-### loop over sx
-indx_doubles_in_triples = sapply( unique_x, function(sx){
-  
-  which( apply( TIM0, 2, function( triple_sx ) sum( grepl( sx, triple_sx ) ) == 2 ) )
-  
-})
-
-TIM = TIM0[, -( indx_doubles_in_triples %>% unlist )  ]; TIM[, 1]; dim( TIM )
